@@ -1,0 +1,34 @@
+[project]
+name = "worldline-agent"
+version = "0.1.0"
+description = "Unified evaluation, distillation, and training for sandboxed agents"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12,<3.15"   # Harbor's dependency fastuuid has no wheel for newer Pythons yet
+dependencies = ["harbor==0.23.0"]
+
+[project.urls]
+Upstream = "https://github.com/mll-lab-nu/embodied-first-exam"
+
+[project.scripts]
+efe = "efe:main"
+worldline = "worldline.cli:main"
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+# The wheel: scripts/efe.py, efe_harbor_hook.py and efe-harbor.pth, nothing else (the tasks are found at run time,
+# scripts/efe.py find_root). An editable install (`uv tool install -e .`) puts scripts/ on the path instead.
+[tool.hatch.build.targets.wheel]
+only-include = ["scripts/efe.py", "scripts/efe_harbor_hook.py"]
+sources = ["scripts"]
+dev-mode-dirs = ["scripts"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"scripts/efe-harbor.pth" = "efe-harbor.pth"
+"worldline" = "worldline"
+
+[tool.hatch.build.targets.sdist]
+only-include = ["scripts/efe.py", "scripts/efe_harbor_hook.py", "scripts/efe-harbor.pth", "worldline", "LICENSE", "README.md"]
