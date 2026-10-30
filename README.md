@@ -75,6 +75,39 @@ worldline ingest /path/to/jobs/<job>/<trial>
 该命令会生成 `result.normalized.json`，统一记录 success、failure 或 infra_error、奖励、过程指标、
 token 使用量以及轨迹和视频的来源引用。大型产物不会被重复复制。
 
+将验证后的轨迹导出为训练数据：
+
+```bash
+# 成功轨迹，用于监督微调
+worldline export runs/ --format sft -o datasets/rua-sft.jsonl
+
+# 同一任务的成功/失败轨迹对，用于 DPO 等偏好学习
+worldline export runs/ --format preference -o datasets/rua-preference.jsonl
+
+# 所有可计数轨迹及其 reward，用于 RL
+worldline export runs/ --format rl -o datasets/rua-rl.jsonl
+```
+
+汇总评测结果：
+
+```bash
+worldline report runs/ -o reports/evaluation.json
+```
+
+报告中的成功率只统计有可信 verdict 的成功和失败，基础设施错误单独计算，不会被当作 Agent 的失败。
+
+多个任务可以按受控并发运行：
+
+```bash
+worldline eval-many \
+  tasks/<benchmark>/<task-a> \
+  tasks/<benchmark>/<task-b> \
+  -a codex -m <model> --max-workers 2
+```
+
+批次中的单个任务失败不会终止其他任务，所有 Run 和错误都会写入 batch manifest。GPU 环境建议从
+`--max-workers 1` 开始，确认显存和 simulator 资源互不冲突后再增加并发。
+
 ## 后续方向
 
 - 状态快照、恢复和多分支 rollout；
