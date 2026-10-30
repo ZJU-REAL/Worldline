@@ -9,8 +9,11 @@ from typing import Sequence
 
 from worldline import __version__
 from worldline.adapters.harbor import load_task
+from worldline.batch import evaluate_many_harbor
+from worldline.datasets import export_dataset
 from worldline.eval import BackendUnavailableError, evaluate_harbor
 from worldline.results import ingest_harbor_trial
+from worldline.report import write_report
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -33,6 +36,27 @@ def _build_parser() -> argparse.ArgumentParser:
     ingest_parser = commands.add_parser("ingest", help="Normalize an existing Harbor trial")
     ingest_parser.add_argument("trial_dir", type=Path)
     ingest_parser.add_argument("--runs-dir", type=Path, default=Path("runs"))
+
+    export_parser = commands.add_parser("export", help="Export verified trajectories for model training")
+    export_parser.add_argument("inputs", type=Path, nargs="+")
+    export_parser.add_argument("--format", choices=("sft", "preference", "rl"), required=True)
+    export_parser.add_argument("--output", "-o", type=Path, required=True)
+    export_parser.add_argument("--include-failures", action="store_true")
+    export_parser.add_argument("--max-pairs-per-task", type=int, default=50)
+
+    report_parser = commands.add_parser("report", help="Summarize normalized evaluation results")
+    report_parser.add_argument("inputs", type=Path, nargs="+")
+    report_parser.add_argument("--output", "-o", type=Path, required=True)
+
+    batch_parser = commands.add_parser("eval-many", help="Evaluate multiple tasks with controlled concurrency")
+    batch_parser.add_argument("task_dirs", type=Path, nargs="+")
+    batch_parser.add_argument("--agent", "-a", required=True)
+    batch_parser.add_argument("--model", "-m")
+    batch_parser.add_argument("--runs-dir", type=Path, default=Path("runs"))
+    batch_parser.add_argument("--harbor-executable", default="harbor")
+    batch_parser.add_argument("--harbor-arg", action="append", default=[])
+    batch_parser.add_argument("--max-workers", type=int, default=1)
+    batch_parser.add_argument("--dry-run", action="store_true")
     return parser
 
 
@@ -91,6 +115,33 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         )
         return 0 if result.outcome != "infra_error" else 2
+    if args.command == "export":
+        manifest = export_dataset(
+            args.inputs,
+            args.output,
+            format=args.format,
+            include_failures=args.include_failures,
+            max_pairs_per_task=args.max_pairs_per_task,
+        )
+        print(json.dumps(manifest, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "report":
+        report = write_report(args.inputs, args.output)
+        print(json.dumps(report["summary"], ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "eval-many":
+        manifest = evaluate_many_harbor(
+            args.task_dirs,
+            agent=args.agent,
+            model=args.model,
+            runs_dir=args.runs_dir,
+            executable=args.harbor_executable,
+            extra_args=args.harbor_arg,
+            dry_run=args.dry_run,
+            max_workers=args.max_workers,
+        )
+        print(json.dumps({key: manifest[key] for key in ("tasks", "statuses")}, ensure_ascii=False, indent=2))
+        return 1 if manifest["statuses"].get("error") else 0
     return 2
 
 
