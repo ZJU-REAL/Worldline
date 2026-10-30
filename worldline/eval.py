@@ -7,12 +7,14 @@ import shutil
 import subprocess
 import time
 import uuid
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Mapping, Sequence
 
 from worldline.adapters.harbor import load_task
 from worldline.run import RunRecord, write_record
+from worldline.run import write_json
+from worldline.results import normalize_harbor_trial
 from worldline.trace import TraceEvent, TraceWriter
 
 
@@ -31,12 +33,41 @@ def harbor_command(
     model: str | None,
     executable: str = "harbor",
     extra_args: Sequence[str] = (),
+    jobs_dir: Path | None = None,
+    job_name: str | None = None,
 ) -> tuple[str, ...]:
     command = [executable, "run", "-y", "-p", str(task_dir), "-a", agent]
     if model:
         command.extend(("-m", model))
+    if jobs_dir is not None:
+        command.extend(("--jobs-dir", str(jobs_dir)))
+    if job_name is not None:
+        command.extend(("--job-name", job_name))
     command.extend(extra_args)
     return tuple(command)
+
+
+def _ingest_completed_trials(backend_jobs_dir: Path, run_dir: Path, trace: TraceWriter, run_id: str) -> int:
+    normalized = []
+    for result_path in sorted(backend_jobs_dir.rglob("result.json")):
+        trial_dir = result_path.parent
+        if not (trial_dir / "verifier").is_dir():
+            continue
+        result = normalize_harbor_trial(trial_dir)
+        normalized.append(asdict(result))
+        trace.append(
+            TraceEvent(
+                run_id=run_id,
+                kind="result.ingested",
+                payload={"trial_id": result.trial_id, "outcome": result.outcome, "source": result.source},
+            )
+        )
+    if not normalized:
+        return 0
+    write_json(run_dir / "results.normalized.json", {"schema_version": "worldline.results/0.1", "results": normalized})
+    if len(normalized) == 1:
+        write_json(run_dir / "result.normalized.json", normalized[0])
+    return len(normalized)
 
 
 def evaluate_harbor(
@@ -58,7 +89,16 @@ def evaluate_harbor(
     run_dir = runs_dir.resolve() / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
     trace = TraceWriter(run_dir / "trace.jsonl")
-    command = harbor_command(task_dir, agent, model, executable, extra_args)
+    backend_jobs_dir = run_dir / "harbor"
+    command = harbor_command(
+        task_dir,
+        agent,
+        model,
+        executable,
+        extra_args,
+        jobs_dir=backend_jobs_dir,
+        job_name="job",
+    )
     record = RunRecord(
         run_id=run_id,
         task_id=task.id,
@@ -102,6 +142,7 @@ def evaluate_harbor(
         completed = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, env=process_env, check=False)
 
     finished_at = time.time_ns()
+    ingested = _ingest_completed_trials(backend_jobs_dir, run_dir, trace, run_id)
     status = "completed" if completed.returncode == 0 else "failed"
     result = replace(
         running,
@@ -119,6 +160,7 @@ def evaluate_harbor(
                 "exit_code": completed.returncode,
                 "duration_ns": finished_at - started_at,
                 "backend_log": str(log_path),
+                "normalized_results": ingested,
             },
         )
     )
