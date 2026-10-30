@@ -22,9 +22,12 @@ class HarborResultTest(unittest.TestCase):
                 {
                     "id": "trial-1",
                     "task_name": "embodied-first-exam/task",
+                    "task_checksum": "checksum-1",
+                    "agent_info": {"name": "codex", "model_info": {"name": "teacher"}},
                     "agent_result": {"n_input_tokens": 12, "n_output_tokens": 3},
                 },
             )
+            write_json(trial / "lock.json", {"task": {"digest": "sha256:task-v1"}})
             write_json(trial / "verifier/reward.json", {"success": 1, "progress": 0.8, "sim_steps": 42})
             (trial / "verifier/reward.txt").write_text("1\n", encoding="utf-8")
             (trial / "verifier/replay.mp4").write_bytes(b"video")
@@ -37,6 +40,10 @@ class HarborResultTest(unittest.TestCase):
             self.assertEqual(result.reward, 1.0)
             self.assertEqual(result.metrics["sim_steps"], 42.0)
             self.assertEqual(result.usage["n_input_tokens"], 12.0)
+            self.assertEqual(result.task_version, "sha256:task-v1")
+            self.assertEqual(result.comparison_key, "embodied-first-exam/task@sha256:task-v1")
+            self.assertEqual(result.agent, "codex")
+            self.assertEqual(result.model, "teacher")
             self.assertEqual({artifact.kind for artifact in result.artifacts}, {"video", "agent_trace"})
 
     def test_missing_verdict_is_infrastructure_error(self) -> None:
@@ -65,6 +72,22 @@ class HarborResultTest(unittest.TestCase):
             self.assertEqual(saved["schema_version"], "worldline.result/0.1")
             self.assertEqual(saved["metrics"]["progress"], 0.25)
             self.assertTrue((run_dir / "trace.jsonl").is_file())
+
+    def test_does_not_index_artifacts_outside_trial(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            trial = root / "trial"
+            write_json(trial / "result.json", {"id": "trial-3"})
+            write_json(trial / "verifier/reward.json", {"success": 1})
+            (trial / "verifier/reward.txt").write_text("1\n", encoding="utf-8")
+            outside = root / "trajectory.json"
+            outside.write_text("{}", encoding="utf-8")
+            (trial / "agent").mkdir()
+            (trial / "agent/trajectory.json").symlink_to(outside)
+
+            result = normalize_harbor_trial(trial)
+
+            self.assertEqual(result.artifacts, ())
 
 
 if __name__ == "__main__":

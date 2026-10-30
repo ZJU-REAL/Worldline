@@ -23,3 +23,15 @@ Preference 数据只在相同 `task_id` 内配对，成功轨迹作为 chosen，
 RL episode 保留所有成功和可信失败轨迹，并携带最终 reward、过程指标、用量和来源路径。训练器可以在此基础上进一步构造 token-level mask、advantage 或 process reward。
 
 每次导出同时生成 `<output>.manifest.json`，记录输入、格式、过滤选项、输出条数以及缺失轨迹等统计信息。
+
+## Split isolation
+
+数据集按 `task_id` 的稳定哈希切分，而不是逐条随机切分。相同任务的不同模型、seed 或 attempt 会进入同一 partition，避免模型在训练集中看到某个任务后又在测试集上评测它。
+
+`validate-dataset` 检查 JSONL 结构、重复 id、缺失 task id 和多个文件之间的 task overlap。切分 manifest 保存比例、seed、各集合记录数和任务数，保证切分可复现。
+
+## Trust boundary
+
+Result ingestion treats Harbor's verifier verdict as trusted and keeps infrastructure errors separate from Agent failures. Artifact references are accepted only when their resolved paths remain inside the source trial; links or relative paths escaping the trial are ignored.
+
+Evaluation reports group trials by `comparison_key`, currently derived from task identity and Harbor's locked task digest. A report warns when the same task name appears under multiple comparison keys, so results from different task versions are not silently combined.

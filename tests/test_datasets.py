@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from worldline.datasets import atif_messages, export_dataset
+from worldline.datasets import atif_messages, export_dataset, split_dataset, validate_datasets
 
 
 def make_result(root: Path, name: str, task: str, outcome: str, reward: float) -> None:
@@ -81,6 +81,36 @@ class DatasetExportTest(unittest.TestCase):
             self.assertEqual(pref_record["chosen_reward"], 1.0)
             self.assertEqual(pref_record["rejected_reward"], 0.0)
             self.assertTrue((root / "sft.jsonl.manifest.json").is_file())
+
+    def test_split_keeps_every_task_in_one_partition(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            dataset = root / "data.jsonl"
+            with dataset.open("w", encoding="utf-8") as stream:
+                for index in range(20):
+                    stream.write(json.dumps({"id": str(index), "task_id": f"task-{index // 2}", "messages": []}) + "\n")
+            output = root / "split"
+
+            manifest = split_dataset(dataset, output, train_ratio=0.6, validation_ratio=0.2, test_ratio=0.2)
+            validation = validate_datasets([output / "train.jsonl", output / "validation.jsonl", output / "test.jsonl"])
+
+            self.assertEqual(sum(manifest["records"].values()), 20)
+            self.assertTrue(validation["valid"])
+            self.assertEqual(validation["overlaps"], [])
+
+    def test_validation_finds_duplicate_ids_and_task_overlap(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            left = root / "left.jsonl"
+            right = root / "right.jsonl"
+            left.write_text(json.dumps({"id": "same", "task_id": "task-a", "messages": []}) + "\n", encoding="utf-8")
+            right.write_text(json.dumps({"id": "same", "task_id": "task-a", "messages": []}) + "\n", encoding="utf-8")
+
+            validation = validate_datasets([left, right])
+
+            self.assertFalse(validation["valid"])
+            self.assertTrue(any("duplicate id" in error for error in validation["errors"]))
+            self.assertEqual(validation["overlaps"][0]["tasks"], ["task-a"])
 
 
 if __name__ == "__main__":

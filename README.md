@@ -86,6 +86,15 @@ worldline export runs/ --format preference -o datasets/rua-preference.jsonl
 
 # 所有可计数轨迹及其 reward，用于 RL
 worldline export runs/ --format rl -o datasets/rua-rl.jsonl
+
+# 按 task_id 切分，保证同一任务的不同 rollout 不会跨集合泄漏
+worldline split datasets/rua-sft.jsonl --output-dir datasets/rua-sft-split
+
+# 检查 JSONL、重复样本和不同集合间的任务重叠
+worldline validate-dataset \
+  datasets/rua-sft-split/train.jsonl \
+  datasets/rua-sft-split/validation.jsonl \
+  datasets/rua-sft-split/test.jsonl
 ```
 
 汇总评测结果：

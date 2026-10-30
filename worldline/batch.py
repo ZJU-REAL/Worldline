@@ -5,7 +5,9 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from pathlib import Path
+import time
 from typing import Sequence
+import uuid
 
 from worldline.eval import evaluate_harbor
 from worldline.run import write_json
@@ -63,8 +65,10 @@ def evaluate_many_harbor(
     for row in rows:
         status = row["run"]["status"] if row["run"] else "error"
         statuses[status] = statuses.get(status, 0) + 1
+    batch_id = f"{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-{uuid.uuid4().hex[:8]}"
     manifest = {
         "schema_version": "worldline.batch/0.1",
+        "batch_id": batch_id,
         "backend": "harbor",
         "agent": agent,
         "model": model,
@@ -74,5 +78,5 @@ def evaluate_many_harbor(
         "statuses": dict(sorted(statuses.items())),
         "runs": rows,
     }
-    write_json(batch_root / "batch.json", manifest)
+    write_json(batch_root / "batches" / f"{batch_id}.json", manifest)
     return manifest
