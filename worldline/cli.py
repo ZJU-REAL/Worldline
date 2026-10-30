@@ -10,6 +10,7 @@ from typing import Sequence
 from worldline import __version__
 from worldline.adapters.harbor import load_task
 from worldline.eval import BackendUnavailableError, evaluate_harbor
+from worldline.results import ingest_harbor_trial
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -28,6 +29,10 @@ def _build_parser() -> argparse.ArgumentParser:
     eval_parser.add_argument("--harbor-executable", default="harbor")
     eval_parser.add_argument("--harbor-arg", action="append", default=[])
     eval_parser.add_argument("--dry-run", action="store_true")
+
+    ingest_parser = commands.add_parser("ingest", help="Normalize an existing Harbor trial")
+    ingest_parser.add_argument("trial_dir", type=Path)
+    ingest_parser.add_argument("--runs-dir", type=Path, default=Path("runs"))
     return parser
 
 
@@ -71,6 +76,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         )
         return record.exit_code or 0
+    if args.command == "ingest":
+        result, run_dir = ingest_harbor_trial(args.trial_dir, args.runs_dir)
+        print(
+            json.dumps(
+                {
+                    "trial_id": result.trial_id,
+                    "outcome": result.outcome,
+                    "reward": result.reward,
+                    "run_dir": str(run_dir),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0 if result.outcome != "infra_error" else 2
     return 2
 
 
