@@ -50,6 +50,16 @@ Worldline 围绕一条完整链路设计：任务定义运行边界，沙盒承�
 
 当前仓库已完整采用 EFE 的目录结构，并新增独立的 `worldline/` 平台层。现阶段已建立 Task、Sandbox、Agent、Verifier 与 Trace 的基础接口，以及 Harbor/EFE 任务读取适配器；原有 `efe` 和 `harbor` 运行方式继续保留。
 
+安装后先检查本机是否具备运行条件：
+
+```bash
+uv tool install -e .
+worldline doctor
+```
+
+`framework_ready` 表示数据与编排工具可用，`evaluation_ready` 还要求 Harbor 和 Docker/Podman 可用。GPU RUA
+任务还需 NVIDIA 容器运行时；缺少容器运行时的机器仍可整理其他节点生成的 runs 并制作蒸馏数据。
+
 可以先检查一个现有任务：
 
 ```bash
@@ -96,6 +106,15 @@ worldline validate-dataset \
   datasets/rua-sft-split/validation.jsonl \
   datasets/rua-sft-split/test.jsonl
 ```
+
+通常直接用一条命令完成报告、三类数据导出、任务级切分和校验：
+
+```bash
+worldline distill runs/ --output-dir datasets/rua-v1
+```
+
+输出目录包含 `report.json`、原始 SFT/preference/RL JSONL、各自的 train/validation/test 切分和
+`manifest.json`。manifest 固化输入、参数、样本统计和校验结果，便于后续训练与复评追溯。
 
 汇总评测结果：
 
