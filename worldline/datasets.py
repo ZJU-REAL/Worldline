@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Literal, Mapping, Sequence
@@ -96,11 +97,14 @@ def atif_messages(trajectory: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...
 
 
 def _trajectory_path(result: Mapping[str, Any]) -> Path | None:
-    source = Path(str(result.get("source") or ""))
+    source = Path(str(result.get("source") or "")).resolve()
     for artifact in result.get("artifacts") or []:
         if isinstance(artifact, dict) and artifact.get("kind") == "agent_trace":
-            candidate = source / str(artifact.get("path"))
-            if candidate.is_file():
+            try:
+                candidate = (source / str(artifact.get("path"))).resolve(strict=True)
+            except (OSError, RuntimeError):
+                continue
+            if candidate.is_relative_to(source) and candidate.is_file():
                 return candidate
     return None
 
@@ -231,3 +235,120 @@ def export_dataset(
     }
     write_json(output.with_suffix(output.suffix + ".manifest.json"), manifest)
     return manifest
+
+
+def _record_task_id(record: Mapping[str, Any]) -> str | None:
+    task_id = record.get("task_id")
+    if isinstance(task_id, str) and task_id:
+        return task_id
+    metadata = record.get("metadata")
+    if isinstance(metadata, dict) and isinstance(metadata.get("task_id"), str):
+        return metadata["task_id"]
+    return None
+
+
+def _jsonl(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
+    with path.open(encoding="utf-8") as stream:
+        for line_number, line in enumerate(stream, start=1):
+            if not line.strip():
+                continue
+            value = json.loads(line)
+            if not isinstance(value, dict):
+                raise ValueError(f"{path}:{line_number}: record must be a JSON object")
+            yield line_number, value
+
+
+def split_dataset(
+    input_path: Path,
+    output_dir: Path,
+    *,
+    train_ratio: float = 0.8,
+    validation_ratio: float = 0.1,
+    test_ratio: float = 0.1,
+    seed: str = "worldline-v1",
+) -> dict[str, Any]:
+    ratios = (train_ratio, validation_ratio, test_ratio)
+    if any(ratio < 0 for ratio in ratios) or abs(sum(ratios) - 1.0) > 1e-9:
+        raise ValueError("train, validation, and test ratios must be non-negative and sum to 1")
+    input_path = input_path.resolve()
+    output_dir = output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    names = ("train", "validation", "test")
+    streams = {name: (output_dir / f"{name}.jsonl").open("w", encoding="utf-8") for name in names}
+    counts = {name: 0 for name in names}
+    tasks: dict[str, str] = {}
+    try:
+        for line_number, record in _jsonl(input_path):
+            task_id = _record_task_id(record)
+            if not task_id:
+                raise ValueError(f"{input_path}:{line_number}: record has no task_id")
+            digest = hashlib.sha256(f"{seed}\0{task_id}".encode()).digest()
+            bucket = int.from_bytes(digest[:8], "big") / 2**64
+            split = "train" if bucket < train_ratio else "validation" if bucket < train_ratio + validation_ratio else "test"
+            tasks[task_id] = split
+            streams[split].write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+            counts[split] += 1
+    finally:
+        for stream in streams.values():
+            stream.close()
+    manifest = {
+        "schema_version": "worldline.split/0.1",
+        "input": str(input_path),
+        "seed": seed,
+        "ratios": dict(zip(names, ratios, strict=True)),
+        "records": counts,
+        "tasks": {name: sum(split == name for split in tasks.values()) for name in names},
+    }
+    write_json(output_dir / "split.manifest.json", manifest)
+    return manifest
+
+
+def validate_datasets(paths: Sequence[Path]) -> dict[str, Any]:
+    errors: list[str] = []
+    seen_ids: dict[str, str] = {}
+    tasks_by_file: dict[str, set[str]] = {}
+    record_counts: dict[str, int] = {}
+    for raw_path in paths:
+        path = raw_path.resolve()
+        tasks: set[str] = set()
+        count = 0
+        try:
+            records = _jsonl(path)
+            for line_number, record in records:
+                count += 1
+                record_id = record.get("id")
+                if isinstance(record_id, str):
+                    previous = seen_ids.get(record_id)
+                    if previous:
+                        errors.append(f"duplicate id {record_id!r}: {previous} and {path}:{line_number}")
+                    else:
+                        seen_ids[record_id] = f"{path}:{line_number}"
+                task_id = _record_task_id(record)
+                if not task_id:
+                    errors.append(f"{path}:{line_number}: missing task_id")
+                else:
+                    tasks.add(task_id)
+                for field in ("messages", "chosen", "rejected"):
+                    if field in record and not isinstance(record[field], (list, tuple)):
+                        errors.append(f"{path}:{line_number}: {field} must be an array")
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            errors.append(str(error))
+        key = str(path)
+        tasks_by_file[key] = tasks
+        record_counts[key] = count
+
+    overlaps: list[dict[str, Any]] = []
+    for (left, left_tasks), (right, right_tasks) in itertools.combinations(tasks_by_file.items(), 2):
+        shared = sorted(left_tasks & right_tasks)
+        if shared:
+            overlaps.append({"left": left, "right": right, "tasks": shared})
+    if overlaps:
+        errors.append(f"task overlap exists between {len(overlaps)} file pairs")
+    return {
+        "schema_version": "worldline.validation/0.1",
+        "valid": not errors,
+        "records": record_counts,
+        "unique_ids": len(seen_ids),
+        "errors": errors,
+        "overlaps": overlaps,
+    }

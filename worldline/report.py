@@ -52,13 +52,22 @@ def build_report(inputs: Sequence[Path]) -> dict[str, Any]:
     records = [_load(path) for path in discover_results(inputs)]
     records = [record for record in records if record]
     by_task: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    by_configuration: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for record in records:
         by_task[str(record.get("task_id") or "unknown")].append(record)
+        by_configuration[str(record.get("comparison_key") or f"{record.get('task_id') or 'unknown'}@unversioned")].append(record)
+    mixed_tasks = {
+        task: sorted({str(record.get("comparison_key") or f"{task}@unversioned") for record in task_records})
+        for task, task_records in by_task.items()
+        if len({str(record.get("comparison_key") or f"{task}@unversioned") for record in task_records}) > 1
+    }
     return {
         "schema_version": "worldline.report/0.1",
         "inputs": [str(path.resolve()) for path in inputs],
         "summary": _summary(records),
         "tasks": {task: _summary(task_records) for task, task_records in sorted(by_task.items())},
+        "configurations": {key: _summary(config_records) for key, config_records in sorted(by_configuration.items())},
+        "warnings": {"mixed_task_configurations": mixed_tasks},
     }
 
 

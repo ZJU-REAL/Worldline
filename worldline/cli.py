@@ -10,7 +10,7 @@ from typing import Sequence
 from worldline import __version__
 from worldline.adapters.harbor import load_task
 from worldline.batch import evaluate_many_harbor
-from worldline.datasets import export_dataset
+from worldline.datasets import export_dataset, split_dataset, validate_datasets
 from worldline.eval import BackendUnavailableError, evaluate_harbor
 from worldline.results import ingest_harbor_trial
 from worldline.report import write_report
@@ -57,6 +57,17 @@ def _build_parser() -> argparse.ArgumentParser:
     batch_parser.add_argument("--harbor-arg", action="append", default=[])
     batch_parser.add_argument("--max-workers", type=int, default=1)
     batch_parser.add_argument("--dry-run", action="store_true")
+
+    split_parser = commands.add_parser("split", help="Split a dataset without leaking tasks across partitions")
+    split_parser.add_argument("input", type=Path)
+    split_parser.add_argument("--output-dir", type=Path, required=True)
+    split_parser.add_argument("--train-ratio", type=float, default=0.8)
+    split_parser.add_argument("--validation-ratio", type=float, default=0.1)
+    split_parser.add_argument("--test-ratio", type=float, default=0.1)
+    split_parser.add_argument("--seed", default="worldline-v1")
+
+    validate_parser = commands.add_parser("validate-dataset", help="Validate JSONL data and task split isolation")
+    validate_parser.add_argument("paths", type=Path, nargs="+")
     return parser
 
 
@@ -142,6 +153,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(json.dumps({key: manifest[key] for key in ("tasks", "statuses")}, ensure_ascii=False, indent=2))
         return 1 if manifest["statuses"].get("error") else 0
+    if args.command == "split":
+        manifest = split_dataset(
+            args.input,
+            args.output_dir,
+            train_ratio=args.train_ratio,
+            validation_ratio=args.validation_ratio,
+            test_ratio=args.test_ratio,
+            seed=args.seed,
+        )
+        print(json.dumps(manifest, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "validate-dataset":
+        validation = validate_datasets(args.paths)
+        print(json.dumps(validation, ensure_ascii=False, indent=2))
+        return 0 if validation["valid"] else 1
     return 2
 
 

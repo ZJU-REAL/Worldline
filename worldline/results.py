@@ -44,6 +44,10 @@ class NormalizedResult:
     artifacts: tuple[ArtifactRef, ...] = ()
     source: str = ""
     error: str | None = None
+    task_version: str | None = None
+    comparison_key: str | None = None
+    agent: str | None = None
+    model: str | None = None
 
 
 def _load_object(path: Path) -> dict[str, Any]:
@@ -72,12 +76,18 @@ def _numbers(values: Mapping[str, Any], *, exclude: set[str] | None = None) -> d
 
 def _artifacts(trial_dir: Path) -> tuple[ArtifactRef, ...]:
     found: list[ArtifactRef] = []
+    trusted_root = trial_dir.resolve()
     for area in ("agent", "verifier", "artifacts"):
         root = trial_dir / area
         if not root.is_dir():
             continue
         for path in root.rglob("*"):
-            if path.is_file() and path.name in ARTIFACT_KINDS:
+            try:
+                resolved = path.resolve(strict=True)
+                safe = resolved.is_relative_to(trusted_root)
+            except (OSError, RuntimeError):
+                safe = False
+            if safe and path.is_file() and path.name in ARTIFACT_KINDS:
                 found.append(
                     ArtifactRef(
                         kind=ARTIFACT_KINDS[path.name],
@@ -93,6 +103,7 @@ def normalize_harbor_trial(trial_dir: Path) -> NormalizedResult:
 
     trial_dir = trial_dir.resolve()
     result = _load_object(trial_dir / "result.json")
+    lock = _load_object(trial_dir / "lock.json")
     reward_path = trial_dir / "verifier" / "reward.json"
     verifier = _load_object(reward_path)
     reward = _reward_txt(trial_dir / "verifier" / "reward.txt")
@@ -125,11 +136,16 @@ def normalize_harbor_trial(trial_dir: Path) -> NormalizedResult:
     for key, value in _numbers(gateway).items():
         usage.setdefault(f"gateway_{key}", value)
 
+    task_id = result.get("task_name")
+    locked_task = lock.get("task") if isinstance(lock.get("task"), dict) else {}
+    task_version = locked_task.get("digest") or result.get("task_checksum")
+    agent_info = result.get("agent_info") if isinstance(result.get("agent_info"), dict) else {}
+    model_info = agent_info.get("model_info") if isinstance(agent_info.get("model_info"), dict) else {}
     return NormalizedResult(
         schema_version="worldline.result/0.1",
         backend="harbor",
         trial_id=str(result.get("id") or trial_dir.name),
-        task_id=result.get("task_name"),
+        task_id=task_id,
         outcome=outcome,
         reward=reward,
         metrics=_numbers(verifier, exclude={"success", "infra_error", "grader_error"}),
@@ -137,6 +153,10 @@ def normalize_harbor_trial(trial_dir: Path) -> NormalizedResult:
         artifacts=_artifacts(trial_dir),
         source=str(trial_dir),
         error=error,
+        task_version=str(task_version) if task_version else None,
+        comparison_key=f"{task_id or 'unknown'}@{task_version or 'unversioned'}",
+        agent=str(agent_info["name"]) if agent_info.get("name") else None,
+        model=str(model_info["name"]) if model_info.get("name") else None,
     )
 
 

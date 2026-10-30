@@ -31,7 +31,9 @@ class BatchEvaluationTest(unittest.TestCase):
 
             self.assertEqual(manifest["tasks"], 2)
             self.assertEqual(manifest["statuses"], {"planned": 2})
-            saved = json.loads((runs / "batch.json").read_text(encoding="utf-8"))
+            manifests = list((runs / "batches").glob("*.json"))
+            self.assertEqual(len(manifests), 1)
+            saved = json.loads(manifests[0].read_text(encoding="utf-8"))
             self.assertEqual(len(saved["runs"]), 2)
             self.assertTrue(all(row["run_dir"] for row in saved["runs"]))
 

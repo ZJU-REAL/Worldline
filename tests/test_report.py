@@ -8,13 +8,22 @@ from pathlib import Path
 from worldline.report import build_report, write_report
 
 
-def result(root: Path, name: str, task: str, outcome: str, reward: float | None, tokens: int = 0) -> None:
+def result(
+    root: Path,
+    name: str,
+    task: str,
+    outcome: str,
+    reward: float | None,
+    tokens: int = 0,
+    version: str = "v1",
+) -> None:
     directory = root / name
     directory.mkdir(parents=True)
     (directory / "result.normalized.json").write_text(
         json.dumps(
             {
                 "task_id": task,
+                "comparison_key": f"{task}@{version}",
                 "outcome": outcome,
                 "reward": reward,
                 "usage": {"n_input_tokens": tokens},
@@ -41,6 +50,18 @@ class ReportTest(unittest.TestCase):
             self.assertEqual(report["summary"]["infra_error_rate"], 1 / 3)
             self.assertEqual(report["summary"]["usage_totals"]["n_input_tokens"], 150)
             self.assertEqual(report["tasks"]["task-a"]["success_rate"], 0.5)
+            self.assertEqual(report["warnings"]["mixed_task_configurations"], {})
+
+    def test_separates_mixed_task_versions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            result(root, "a", "task-a", "success", 1, version="v1")
+            result(root, "b", "task-a", "failure", 0, version="v2")
+
+            report = build_report([root])
+
+            self.assertEqual(set(report["configurations"]), {"task-a@v1", "task-a@v2"})
+            self.assertEqual(report["warnings"]["mixed_task_configurations"]["task-a"], ["task-a@v1", "task-a@v2"])
 
     def test_writes_report(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
