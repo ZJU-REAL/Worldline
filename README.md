@@ -56,6 +56,15 @@ Worldline 围绕一条完整链路设计：任务定义运行边界，沙盒承�
 python -m worldline.cli inspect tasks/<benchmark>/<task>
 ```
 
+也可以先规划一次评测，检查将要运行的命令并生成标准 Run 记录，而不启动沙盒：
+
+```bash
+worldline eval tasks/<benchmark>/<task> -a oracle --dry-run
+```
+
+去掉 `--dry-run` 后，Worldline 会调用 Harbor 执行任务，并在 `runs/<run-id>/` 下保存 `run.json`、
+`trace.jsonl` 和 `backend.log`。运行数据默认不提交到 Git。
+
 ## 后续方向
 
 - 状态快照、恢复和多分支 rollout；

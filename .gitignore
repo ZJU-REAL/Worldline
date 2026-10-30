@@ -8,6 +8,7 @@ __pycache__/
 # run outputs and logs
 /exps/
 /jobs/
+/runs/
 *.log
 nohup.out
 # secrets
