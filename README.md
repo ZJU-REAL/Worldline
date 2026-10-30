@@ -63,7 +63,8 @@ worldline eval tasks/<benchmark>/<task> -a oracle --dry-run
 ```
 
 去掉 `--dry-run` 后，Worldline 会调用 Harbor 执行任务，并在 `runs/<run-id>/` 下保存 `run.json`、
-`trace.jsonl` 和 `backend.log`。运行数据默认不提交到 Git。
+`trace.jsonl` 和 `backend.log`。Harbor trial 会保存在该 Run 的 `harbor/` 子目录，执行结束后自动生成
+`result.normalized.json`；多次 attempt 还会汇总到 `results.normalized.json`。运行数据默认不提交到 Git。
 
 已有的 Harbor trial 可以直接归一化，不需要重新执行：
 
