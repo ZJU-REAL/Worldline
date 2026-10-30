@@ -11,6 +11,8 @@ from worldline import __version__
 from worldline.adapters.harbor import load_task
 from worldline.batch import evaluate_many_harbor
 from worldline.datasets import export_dataset, split_dataset, validate_datasets
+from worldline.distill import build_distillation_bundle
+from worldline.doctor import doctor
 from worldline.eval import BackendUnavailableError, evaluate_harbor
 from worldline.results import ingest_harbor_trial
 from worldline.report import write_report
@@ -68,6 +70,18 @@ def _build_parser() -> argparse.ArgumentParser:
 
     validate_parser = commands.add_parser("validate-dataset", help="Validate JSONL data and task split isolation")
     validate_parser.add_argument("paths", type=Path, nargs="+")
+
+    commands.add_parser("doctor", help="Check whether this host can run Worldline evaluations")
+
+    distill_parser = commands.add_parser("distill", help="Build a complete training-data bundle from evaluation runs")
+    distill_parser.add_argument("inputs", type=Path, nargs="+")
+    distill_parser.add_argument("--output-dir", type=Path, required=True)
+    distill_parser.add_argument("--train-ratio", type=float, default=0.8)
+    distill_parser.add_argument("--validation-ratio", type=float, default=0.1)
+    distill_parser.add_argument("--test-ratio", type=float, default=0.1)
+    distill_parser.add_argument("--seed", default="worldline-v1")
+    distill_parser.add_argument("--include-failures-in-sft", action="store_true")
+    distill_parser.add_argument("--max-pairs-per-task", type=int, default=50)
     return parser
 
 
@@ -168,6 +182,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         validation = validate_datasets(args.paths)
         print(json.dumps(validation, ensure_ascii=False, indent=2))
         return 0 if validation["valid"] else 1
+    if args.command == "doctor":
+        diagnosis = doctor()
+        print(json.dumps(diagnosis, ensure_ascii=False, indent=2))
+        return 0 if diagnosis["evaluation_ready"] else 1
+    if args.command == "distill":
+        manifest = build_distillation_bundle(
+            args.inputs,
+            args.output_dir,
+            train_ratio=args.train_ratio,
+            validation_ratio=args.validation_ratio,
+            test_ratio=args.test_ratio,
+            seed=args.seed,
+            include_failures_in_sft=args.include_failures_in_sft,
+            max_pairs_per_task=args.max_pairs_per_task,
+        )
+        print(json.dumps({"output_dir": manifest["output_dir"], "report": manifest["report"], "records": {
+            name: data["export"]["records"] for name, data in manifest["datasets"].items()
+        }}, ensure_ascii=False, indent=2))
+        return 0
     return 2
 
 
