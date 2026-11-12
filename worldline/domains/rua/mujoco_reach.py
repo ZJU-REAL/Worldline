@@ -47,6 +47,7 @@ class MujocoReach:
         return {
             "protocol": "worldline.rua/0.1",
             "robot": "planar-two-link-arm",
+            "simulator_version": self.mujoco.__version__,
             "action_schema": {
                 "type": "object",
                 "properties": {

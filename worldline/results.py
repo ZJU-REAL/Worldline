@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -48,6 +49,12 @@ class NormalizedResult:
     comparison_key: str | None = None
     agent: str | None = None
     model: str | None = None
+    error_code: str | None = None
+    retryable: bool = False
+    counted: bool = True
+    logical_trial_id: str | None = None
+    attempt: int = 1
+    superseded_by: str | None = None
 
 
 def _load_object(path: Path) -> dict[str, Any]:
@@ -110,11 +117,26 @@ def normalize_harbor_trial(trial_dir: Path) -> NormalizedResult:
     if reward is None and isinstance(verifier.get("success"), (int, float)):
         reward = float(verifier["success"])
 
-    exception = (result.get("exception_info") or {}).get("exception_type") or None
+    exception_info = result.get("exception_info")
+    exception = exception_info.get("exception_type") if isinstance(exception_info, dict) else None
     infra = bool(verifier.get("infra_error") or verifier.get("grader_error"))
+    invalid_reward = reward is not None and not math.isfinite(reward)
+    success_value = verifier.get("success")
+    invalid_success = success_value is not None and (
+        not isinstance(success_value, (int, float)) or not math.isfinite(success_value)
+    )
+    contradictory = (
+        isinstance(success_value, (int, float))
+        and reward in {0, 1}
+        and success_value in {0, 1}
+        and reward != success_value
+    )
     if not reward_path.is_file() or not verifier:
         infra = True
         error = "verifier wrote no readable reward.json"
+    elif invalid_reward or invalid_success or contradictory:
+        infra, reward = True, None
+        error = "verifier wrote a non-finite or contradictory verdict"
     elif exception and exception != "AgentTimeoutError" and verifier.get("success") != 1:
         infra = True
         error = f"Harbor ended the trial with {exception}"

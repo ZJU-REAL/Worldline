@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import time
+import hashlib
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -61,6 +62,10 @@ def _ingest_completed_trials(backend_jobs_dir: Path, run_dir: Path, trace: Trace
     write_json(run_dir / "results.normalized.json", {"schema_version": "worldline.results/0.1", "results": normalized})
     if len(normalized) == 1:
         write_json(run_dir / "result.normalized.json", normalized[0])
+    else:
+        for result in normalized:
+            key = hashlib.sha256(str(result["source"]).encode()).hexdigest()[:16]
+            write_json(run_dir / "trials" / key / "result.normalized.json", result)
     return len(normalized)
 
 

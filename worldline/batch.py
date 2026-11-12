@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict
 from pathlib import Path
 import time
@@ -56,9 +56,19 @@ def evaluate_many_harbor(
             }
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(run, task): task for task in task_dirs}
-        for future in as_completed(futures):
-            rows.append(future.result())
+        tasks = iter(task_dirs)
+        pending = set()
+        for _ in range(max_workers):
+            task = next(tasks, None)
+            if task is not None:
+                pending.add(pool.submit(run, task))
+        while pending:
+            completed, pending = wait(pending, return_when=FIRST_COMPLETED)
+            for future in completed:
+                rows.append(future.result())
+                task = next(tasks, None)
+                if task is not None:
+                    pending.add(pool.submit(run, task))
 
     rows.sort(key=lambda row: row["task_dir"])
     statuses: dict[str, int] = {}

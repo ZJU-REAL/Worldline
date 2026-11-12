@@ -14,6 +14,18 @@ def write_json(path: Path, value: object) -> None:
 
 
 class HarborResultTest(unittest.TestCase):
+    def test_nonfinite_and_contradictory_verdicts_do_not_become_success(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            trial = Path(temp_dir)
+            (trial / "verifier").mkdir()
+            write_json(trial / "verifier/reward.json", {"success": 0})
+            (trial / "verifier/reward.txt").write_text("1")
+            result = normalize_harbor_trial(trial)
+            self.assertEqual(result.outcome, "infra_error")
+            self.assertIsNone(result.reward)
+            (trial / "verifier/reward.txt").write_text("nan")
+            self.assertEqual(normalize_harbor_trial(trial).outcome, "infra_error")
+
     def test_normalizes_success_and_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             trial = Path(temp_dir) / "task__trial"

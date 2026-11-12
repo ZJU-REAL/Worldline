@@ -1,0 +1,25 @@
+schema_version = "worldline.task/0.1"
+
+[task]
+id = "cua/form-test"
+domain = "cua"
+environment = "cua.browsergym"
+split = "test"
+seed = 19
+
+[environment]
+render = true
+
+[environment.fields]
+Project = "Atlas"
+Owner = "Lin"
+
+[evaluation]
+timeout_sec = 120
+max_actions = 20
+max_turns = 20
+reset_budget = 0
+
+[metadata]
+split_group = "project-form-atlas"
+purpose = "integration_fixture"

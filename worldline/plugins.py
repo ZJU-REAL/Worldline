@@ -15,13 +15,16 @@ class EnvironmentPlugin:
     domain: str
     version: str
     factory: Callable[[Task, Mapping[str, Any]], Environment]
+    restartable: bool = True
+    preflight: Callable[[], None] | None = None
 
 
 def environment_plugins() -> dict[str, EnvironmentPlugin]:
     # Importing these modules must not import their optional simulator libraries.
     from worldline.domains.rua import plugins
+    from worldline.domains.cua import plugins as cua_plugins
 
-    registered = {plugin.name: plugin for plugin in plugins()}
+    registered = {plugin.name: plugin for plugin in (*plugins(), *cua_plugins())}
     for entry in entry_points(group="worldline.environments"):
         plugin = entry.load()()
         if not isinstance(plugin, EnvironmentPlugin) or plugin.name != entry.name:

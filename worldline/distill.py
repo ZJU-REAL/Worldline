@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Sequence
 
-from worldline.datasets import export_dataset, split_dataset, validate_datasets
+from worldline.datasets import export_datasets, split_dataset, validate_datasets
 from worldline.report import write_report
 from worldline.run import write_json
 
@@ -28,15 +28,15 @@ def build_distillation_bundle(
     report = write_report(inputs, output_dir / "report.json")
     datasets: dict[str, Any] = {}
 
+    exports = export_datasets(
+        inputs,
+        {name: output_dir / "raw" / f"{name}.jsonl" for name in ("sft", "preference", "rl")},
+        include_failures=include_failures_in_sft,
+        max_pairs_per_task=max_pairs_per_task,
+    )
     for format_name in ("sft", "preference", "rl"):
         raw_path = output_dir / "raw" / f"{format_name}.jsonl"
-        export = export_dataset(
-            inputs,
-            raw_path,
-            format=format_name,  # type: ignore[arg-type]
-            include_failures=include_failures_in_sft,
-            max_pairs_per_task=max_pairs_per_task,
-        )
+        export = exports[format_name]
         split_dir = output_dir / "splits" / format_name
         split = split_dataset(
             raw_path,

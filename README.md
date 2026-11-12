@@ -8,6 +8,26 @@ Worldline 是一个面向 RUA（Robot-Use Agent）和 CUA（Computer-Use Agent�
 
 ## 核心目标
 
+0.2 版增加了持久化批次与恢复、受控模型/基础设施重试、CPU/GPU admission、流式蒸馏、图像去重、
+LLaMA-Factory/verl 数据交付和真实 BrowserGym CUA 接入。修复依据、测试与未完成事项见
+[基础设施复审](docs/worldline/infra-review.md)。当前定位为单机研发基础设施，正式大规模 benchmark、
+在线 RL 环境桥和桌面 VM CUA 仍需独立接入与实测。
+
+```bash
+# 中断后使用相同任务与 Agent 配置恢复；完成的 trial 不再次执行
+worldline rollout examples/rua/reach-train -a reference --batch-id rua-v1
+worldline rollout examples/rua/reach-train -a reference --batch-id rua-v1 --resume
+
+# 将已划分数据交给独立训练框架
+worldline training-handoff datasets/rua-v1/splits/sft/train.jsonl \
+  --framework llama-factory --output-dir datasets/lf-package
+worldline training-handoff datasets/rua-v1/splits/sft/train.jsonl \
+  --framework verl --output-dir datasets/verl-package
+```
+
+浏览器安装与实际运行见 [CUA 指南](docs/worldline/cua.md)，训练格式与模型/processor 选择见
+[训练交付指南](docs/worldline/training-handoff.md)。
+
 - 一次接入，同时支持评测、数据生成、蒸馏和训练。
 - 隔离 Agent、环境和验证器，保证奖励可信、实验可复现。
 - 统一任务生命周期和轨迹格式，不强行统一不同领域的动作空间。

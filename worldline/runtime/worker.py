@@ -5,6 +5,8 @@ from __future__ import annotations
 import contextlib
 import json
 import sys
+import os
+import signal
 from dataclasses import asdict
 
 from worldline.contracts import Task
@@ -13,6 +15,21 @@ from worldline.plugins import get_environment_plugin
 
 
 def main() -> int:
+    # A killed launcher must not leave a detached simulator/browser consuming resources.
+    if sys.platform == "linux":
+        import ctypes
+
+        parent = os.getppid()
+
+        def terminate(*_):
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            os.killpg(os.getpgrp(), signal.SIGTERM)
+            raise SystemExit(0)
+
+        signal.signal(signal.SIGTERM, terminate)
+        ctypes.CDLL(None).prctl(1, signal.SIGTERM)
+        if os.getppid() != parent:
+            terminate()
     environment = None
     try:
         for line in sys.stdin:

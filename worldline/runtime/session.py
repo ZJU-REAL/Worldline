@@ -11,12 +11,14 @@ from pathlib import Path
 from typing import Callable
 
 from worldline.contracts import Agent
-from worldline.errors import AgentError, BudgetExceeded, InvalidAction
+from worldline import __version__
+from worldline.errors import AgentError, BudgetExceeded, InvalidAction, ModelAPIError
 from worldline.results import ArtifactRef, NormalizedResult
 from worldline.run import RunRecord, write_json, write_record, make_run_id
 from worldline.runtime.process import AgentView, ProcessEnvironment
 from worldline.tasks import load_native_task
 from worldline.trace import TraceEvent, TraceWriter
+from worldline.media import MediaStore
 
 
 def evaluate_native(
@@ -27,7 +29,12 @@ def evaluate_native(
     model: str | None = None,
     runs_dir: Path = Path("runs"),
     dry_run: bool = False,
-    harness_version: str = "native-tools/0.1",
+    harness_version: str = "native-tools/0.2",
+    agent_config: dict | None = None,
+    on_created: Callable | None = None,
+    logical_trial_id: str | None = None,
+    attempt: int = 1,
+    worker_env: dict[str, str] | None = None,
 ) -> tuple[RunRecord, Path]:
     definition = load_native_task(task_dir)
     task = definition.task
@@ -46,6 +53,8 @@ def evaluate_native(
         metadata={
             **task.metadata,
             "harness_version": harness_version,
+            "worldline_version": __version__,
+            "agent_config": agent_config or {},
             "environment_config": dict(definition.environment_config),
             "seed": task.seed,
             "split": task.split,
@@ -58,8 +67,11 @@ def evaluate_native(
         },
     )
     write_record(run_dir, record)
+    if on_created is not None:
+        on_created(record, run_dir)
     write_json(run_dir / "task.json", asdict(task))
-    trace = TraceWriter(run_dir / "trace.jsonl")
+    media = MediaStore(run_dir)
+    trace = TraceWriter(run_dir / "trace.jsonl", sync_every=32, media_store=media)
 
     def emit(kind, payload):
         trace.append(TraceEvent(run_id=run_id, kind=kind, payload=payload))
@@ -67,6 +79,7 @@ def evaluate_native(
     emit("run.created", {"backend": task.environment})
     if dry_run:
         emit("run.planned", {})
+        trace.close()
         return record, run_dir
     record = replace(record, status="running", started_at_ns=time.time_ns())
     write_record(run_dir, record)
@@ -75,12 +88,23 @@ def evaluate_native(
     messages = [{"role": "user", "content": task.instruction}]
     usage = {}
     outcome, reward, error, metrics = "infra_error", None, None, {}
+    error_code, retryable, interrupted = None, False, None
+    environment_spec_hash = None
+    timings = {}
+    provider_failure = None
     try:
-        environment = ProcessEnvironment(definition, run_dir)
+        stage = time.monotonic()
+        environment = (
+            ProcessEnvironment(definition, run_dir, worker_env=worker_env)
+            if worker_env
+            else ProcessEnvironment(definition, run_dir)
+        )
         initial = environment.start()
+        timings["environment_startup_s"] = time.monotonic() - stage
         from worldline.agents.tool_agent import tools_for
 
         environment.spec["tools"] = tools_for(environment.spec)
+        environment_spec_hash = hashlib.sha256(json.dumps(environment.spec, sort_keys=True).encode()).hexdigest()
         emit("environment.started", {"spec": environment.spec, "observation": initial})
         view = AgentView(environment, emit)
         agent = agent_factory(
@@ -93,13 +117,21 @@ def evaluate_native(
             deadline=environment.deadline,
         )
         try:
+            stage = time.monotonic()
             agent.run(task, view)
         except (BudgetExceeded, InvalidAction, AgentError) as agent_error:
             error = f"{type(agent_error).__name__}: {agent_error}"
             emit("agent.stopped", {"error": error})
+        except ModelAPIError as api_error:
+            provider_failure = api_error
+            error, error_code, retryable = str(api_error), api_error.code, api_error.retryable
+            emit("agent.provider_error", {"error_code": error_code, "retryable": retryable})
         finally:
+            timings["agent_duration_s"] = time.monotonic() - stage
             view.close()
+        stage = time.monotonic()
         verdict = environment.verify(task, run_dir)
+        timings["verification_duration_s"] = time.monotonic() - stage
         if verdict.infra_error:
             raise RuntimeError(verdict.infra_error)
         if not math.isfinite(verdict.reward):
@@ -109,8 +141,18 @@ def evaluate_native(
         reward, metrics = verdict.reward, dict(verdict.metrics)
         success = metrics.get("success", reward == 1) == 1
         outcome = "success" if success else "failure"
-    except Exception as infra:
+        if provider_failure and not success and metrics.get("terminated") != 1:
+            outcome, reward = "infra_error", None
+        elif outcome != "infra_error":
+            retryable = False
+    except BaseException as infra:
         error = f"{type(infra).__name__}: {infra}"
+        error_code = getattr(
+            infra, "code", "run.interrupted" if isinstance(infra, KeyboardInterrupt) else "run.permanent_error"
+        )
+        retryable = bool(getattr(infra, "retryable", False))
+        if not isinstance(infra, Exception):
+            interrupted = infra
         emit("run.infra_error", {"error": error})
     finally:
         if view is not None:
@@ -121,12 +163,18 @@ def evaluate_native(
         write_json(
             run_dir / "agent" / "trajectory.json",
             {
-                "schema_version": "worldline.messages/0.1",
+                "schema_version": "worldline.messages/0.2",
                 "session_id": run_id,
-                "messages": messages,
+                "messages": media.externalize(messages),
                 "tools": environment.spec.get("tools", []) if environment is not None else [],
             },
         )
+    metrics.update(
+        run_duration_s=(time.time_ns() - record.started_at_ns) / 1e9,
+        media_files=float(media.files_written),
+        media_bytes=float(media.bytes_written),
+    )
+    metrics.update(timings)
     emit("run.finished", {"outcome": outcome, "reward": reward, "error": error})
     artifacts = []
     for kind, relative in (
@@ -143,6 +191,9 @@ def evaluate_native(
         "backend": task.environment,
         "budgets": record.metadata["evaluation"],
         "harness": harness_version,
+        "worldline_version": __version__,
+        "agent_config": agent_config or {},
+        "environment_spec_hash": environment_spec_hash,
     }
     key = hashlib.sha256(json.dumps(configuration, sort_keys=True).encode()).hexdigest()
     result = NormalizedResult(
@@ -161,6 +212,10 @@ def evaluate_native(
         comparison_key=f"{task.id}@{key}",
         agent=agent_name,
         model=model,
+        error_code=error_code,
+        retryable=retryable,
+        logical_trial_id=logical_trial_id,
+        attempt=attempt,
     )
     write_json(run_dir / "result.normalized.json", asdict(result))
     record = replace(
@@ -170,4 +225,7 @@ def evaluate_native(
         exit_code=2 if outcome == "infra_error" else 0,
     )
     write_record(run_dir, record)
+    trace.close()
+    if interrupted is not None:
+        raise interrupted
     return record, run_dir

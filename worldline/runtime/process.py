@@ -21,7 +21,7 @@ from worldline.tasks import NativeTask
 class ProcessEnvironment:
     """Runner-owned channel. AgentView exposes only public interactions."""
 
-    def __init__(self, definition: NativeTask, run_dir: Path) -> None:
+    def __init__(self, definition: NativeTask, run_dir: Path, *, worker_env: dict[str, str] | None = None) -> None:
         self.definition = definition
         self.deadline = time.monotonic() + definition.timeout_sec
         self.log = (run_dir / "worker.log").open("wb")
@@ -33,16 +33,22 @@ class ProcessEnvironment:
                 stderr=self.log,
                 start_new_session=True,
                 bufsize=0,
+                env={**os.environ, **(worker_env or {})},
             )
         except BaseException:
             self.log.close()
             raise
         self.pending = b""
         self.spec: dict = {}
+        self.deadline_abort = False
 
     def request(self, method: str, *, verification: bool = False, **payload: Any) -> Any:
         if self.process.poll() is not None:
-            raise EnvironmentError(f"environment process exited with {self.process.returncode}; see worker.log")
+            raise EnvironmentError(
+                f"environment process exited with {self.process.returncode}; see worker.log",
+                code="worker.deadline_abort" if self.deadline_abort else "worker.crashed",
+                retryable=not self.deadline_abort,
+            )
         deadline = time.monotonic() + 15 if verification else self.deadline
         if time.monotonic() >= deadline:
             raise BudgetExceeded("task wall-clock budget exhausted")
@@ -58,6 +64,7 @@ class ProcessEnvironment:
             while sent < len(encoded):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0 or not select.select([], [descriptor], [], max(0, remaining))[1]:
+                    self.deadline_abort = True
                     self.close(graceful=False)
                     raise BudgetExceeded("worker request deadline exhausted")
                 try:
@@ -67,6 +74,7 @@ class ProcessEnvironment:
             while b"\n" not in self.pending:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0 or not select.select([self.process.stdout], [], [], max(0, remaining))[0]:
+                    self.deadline_abort = True
                     # A timed-out command may still mutate state. Kill it before grading.
                     self.close(graceful=False)
                     if verification:
@@ -74,7 +82,11 @@ class ProcessEnvironment:
                     raise BudgetExceeded("environment request exceeded the wall-clock budget")
                 chunk = os.read(self.process.stdout.fileno(), 65536)
                 if not chunk:
-                    raise EnvironmentError("environment worker closed its response stream; see worker.log")
+                    raise EnvironmentError(
+                        "environment worker closed its response stream; see worker.log",
+                        code="worker.crashed",
+                        retryable=True,
+                    )
                 self.pending += chunk
                 if len(self.pending) > 16 * 1024 * 1024:
                     raise EnvironmentError("environment response exceeds 16 MiB")

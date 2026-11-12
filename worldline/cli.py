@@ -19,6 +19,8 @@ from worldline.results import ingest_harbor_trial
 from worldline.report import write_report
 from worldline.adapters.rua.catalog import catalog_task_paths, write_catalog
 from worldline.learning.launch import train
+from worldline.learning.handoff import export_handoff
+from worldline.diagnostics import profile_trace
 from worldline.plugins import environment_plugins
 from worldline.runtime.batch import evaluate_many_native
 from worldline.tasks import load_native_task
@@ -92,13 +94,34 @@ def _build_parser() -> argparse.ArgumentParser:
     commands.add_parser("plugins", help="List available environment plugins without importing simulators")
     rollout = commands.add_parser("rollout", help="Evaluate native tasks through a registered environment")
     rollout.add_argument("task_dirs", nargs="+", type=Path)
-    rollout.add_argument("--agent", "-a", choices=("reference", "noop", "openai-compatible"), required=True)
+    rollout.add_argument(
+        "--agent", "-a", choices=("reference", "cua-reference", "noop", "openai-compatible"), required=True
+    )
     rollout.add_argument("--model", "-m")
     rollout.add_argument("--base-url", default="http://localhost:8000/v1")
     rollout.add_argument("--api-key-env", default="WORLDLINE_API_KEY")
     rollout.add_argument("--runs-dir", type=Path, default=Path("runs"))
     rollout.add_argument("--max-workers", type=int, default=1)
     rollout.add_argument("--dry-run", action="store_true")
+    rollout.add_argument("--batch-id")
+    rollout.add_argument("--resume", action="store_true")
+    rollout.add_argument("--max-infra-retries", type=int, choices=(0, 1), default=1)
+    rollout.add_argument("--model-retries", type=int, default=2)
+    rollout.add_argument("--harness-version", default="native-tools/0.2")
+    rollout.add_argument("--cpu-budget", type=int)
+    rollout.add_argument("--gpu-devices", default="")
+
+    handoff = commands.add_parser("training-handoff", help="Prepare a portable LLaMA-Factory or verl data package")
+    handoff.add_argument("train_file", type=Path)
+    handoff.add_argument("--validation-file", type=Path)
+    handoff.add_argument("--framework", choices=("llama-factory", "verl"), required=True)
+    handoff.add_argument("--output-dir", type=Path, required=True)
+    handoff.add_argument("--model", default="REPLACE_WITH_MODEL")
+    handoff.add_argument("--template", default="qwen")
+    profile = commands.add_parser("profile-trace", help="Measure trace/media storage with a reproducible fixture")
+    profile.add_argument("--output-dir", type=Path, required=True)
+    profile.add_argument("--events", type=int, default=100)
+    profile.add_argument("--unique-images", type=int, default=1)
 
     catalog = commands.add_parser("rua-catalog", help="Index existing RUA/EFE task packages without copying them")
     catalog.add_argument("root", type=Path)
@@ -160,12 +183,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             from worldline.agents.tool_agent import OpenAICompatibleAgent
 
             factory = partial(
-                OpenAICompatibleAgent, model=args.model, base_url=args.base_url, api_key_env=args.api_key_env
+                OpenAICompatibleAgent,
+                model=args.model,
+                base_url=args.base_url,
+                api_key_env=args.api_key_env,
+                max_retries=args.model_retries,
             )
         else:
             from worldline.domains.rua.reference import ReachReferenceAgent
+            from worldline.domains.cua.reference import FormReferenceAgent
 
-            factory = partial(ReachReferenceAgent, noop=args.agent == "noop")
+            def factory(**kwargs):
+                policy = FormReferenceAgent if kwargs["spec"].get("domain") == "cua" else ReachReferenceAgent
+                return policy(noop=args.agent == "noop", **kwargs)
+
         manifest = evaluate_many_native(
             args.task_dirs,
             agent_factory=factory,
@@ -174,9 +205,40 @@ def main(argv: Sequence[str] | None = None) -> int:
             runs_dir=args.runs_dir,
             max_workers=args.max_workers,
             dry_run=args.dry_run,
+            harness_version=args.harness_version,
+            agent_config={
+                "base_url": args.base_url,
+                "api_key_env": args.api_key_env,
+                "model_retries": args.model_retries,
+            }
+            if args.agent == "openai-compatible"
+            else {"policy": args.agent},
+            batch_id=args.batch_id,
+            resume=args.resume,
+            max_infra_retries=args.max_infra_retries,
+            cpu_budget=args.cpu_budget,
+            gpu_devices=tuple(device for device in args.gpu_devices.split(",") if device),
         )
         print(json.dumps(manifest, ensure_ascii=False, indent=2))
         return 2 if any(manifest["statuses"].get(key) for key in ("error", "infra_error")) else 0
+    if args.command == "training-handoff":
+        try:
+            manifest = export_handoff(
+                args.train_file,
+                args.output_dir,
+                framework=args.framework,
+                validation_file=args.validation_file,
+                model=args.model,
+                template=args.template,
+            )
+        except (ValueError, OSError, KeyError) as error:
+            parser.error(str(error))
+        print(json.dumps(manifest, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "profile-trace":
+        report = profile_trace(args.output_dir, events=args.events, unique_images=args.unique_images)
+        print(json.dumps(report, indent=2))
+        return 0
     if args.command == "rua-catalog":
         data = write_catalog(args.root, args.output, mode=args.mode, split=args.split, benchmark=args.benchmark)
         print(json.dumps({"tasks": data["count"], "errors": data["errors"], "output": str(args.output)}, indent=2))

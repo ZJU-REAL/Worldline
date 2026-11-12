@@ -9,13 +9,14 @@ from __future__ import annotations
 import json
 import os
 import time
+import random
 import urllib.error
 import urllib.request
 from typing import Any
 from urllib.parse import urlparse
 
 from worldline.contracts import Sandbox, Task
-from worldline.errors import AgentError, BudgetExceeded, InvalidAction
+from worldline.errors import AgentError, BudgetExceeded, InvalidAction, ModelAPIError
 
 
 def tools_for(spec: dict) -> list[dict]:
@@ -48,6 +49,8 @@ def observation_content(observation: Any) -> str | list[dict]:
     state = {key: value for key, value in observation.items() if key != "images"}
     content = [{"type": "text", "text": json.dumps(state, ensure_ascii=False)}]
     for frame in observation["images"]:
+        if frame.get("name"):
+            content.append({"type": "text", "text": f"Image: {frame['name']}"})
         content.append({"type": "image_url", "image_url": {"url": f"data:{frame['mime_type']};base64,{frame['data']}"}})
     return content
 
@@ -81,6 +84,8 @@ class OpenAICompatibleAgent:
         usage: dict,
         max_turns: int,
         deadline: float,
+        max_retries: int = 2,
+        retry_base_sec: float = 0.5,
     ) -> None:
         parsed = urlparse(base_url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password:
@@ -90,6 +95,9 @@ class OpenAICompatibleAgent:
         self.spec, self.initial = spec, initial_observation
         self.emit, self.messages, self.usage = emit, messages, usage
         self.max_turns, self.deadline = max_turns, deadline
+        if type(max_retries) is not int or not 0 <= max_retries <= 5 or retry_base_sec < 0:
+            raise ValueError("model retries must be in [0, 5] and retry delay nonnegative")
+        self.max_retries, self.retry_base_sec = max_retries, retry_base_sec
 
     def _completion(self) -> dict:
         remaining = self.deadline - time.monotonic()
@@ -107,15 +115,42 @@ class OpenAICompatibleAgent:
         if key:
             headers["Authorization"] = f"Bearer {key}"
         request = urllib.request.Request(self.url, data=json.dumps(body).encode(), headers=headers)
-        # No implicit retries: model calls and physical actions remain auditable.
-        try:
-            with urllib.request.urlopen(request, timeout=min(remaining, 120)) as response:
-                result = json.load(response)
-        except urllib.error.HTTPError as error:
-            # Do not put provider response bodies (which can echo credentials) in traces.
-            raise RuntimeError(f"model API returned HTTP {error.code}") from error
-        except (OSError, ValueError) as error:
-            raise RuntimeError(f"model API transport failed: {type(error).__name__}") from error
+        for attempt in range(self.max_retries + 1):
+            self.usage["model_requests"] = self.usage.get("model_requests", 0) + 1
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                raise BudgetExceeded("model wall-clock budget exhausted")
+            try:
+                with urllib.request.urlopen(request, timeout=min(remaining, 120)) as response:
+                    result = json.load(response)
+                break
+            except urllib.error.HTTPError as error:
+                try:
+                    retry_after = float(error.headers.get("Retry-After", ""))
+                except (ValueError, TypeError):
+                    retry_after = None
+                failure = ModelAPIError(
+                    f"model API returned HTTP {error.code}", status=error.code, retry_after=retry_after
+                )
+            except OSError as error:
+                failure = ModelAPIError(f"model API transport failed: {type(error).__name__}")
+            except ValueError as error:
+                raise ModelAPIError("model API returned malformed JSON", status=422) from error
+            if not failure.retryable or attempt == self.max_retries:
+                raise failure
+            delay = min(
+                30,
+                max(
+                    0,
+                    failure.retry_after
+                    if failure.retry_after is not None
+                    else self.retry_base_sec * 2**attempt * random.uniform(0.8, 1.2),
+                ),
+            )
+            if delay >= self.deadline - time.monotonic():
+                raise failure
+            self.emit("model.retry", {"attempt": attempt + 1, "error_code": failure.code, "delay_sec": delay})
+            time.sleep(delay)
         for key, value in (result.get("usage") or {}).items():
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 self.usage[key] = self.usage.get(key, 0) + value

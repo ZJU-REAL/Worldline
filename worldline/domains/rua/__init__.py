@@ -9,5 +9,5 @@ def plugins() -> tuple[EnvironmentPlugin, ...]:
 
     return (
         EnvironmentPlugin("rua.mujoco-reach", "rua", MujocoReach.version(), MujocoReach),
-        EnvironmentPlugin("rua.socket", "rua", "rua-robot/1.0-adapter/0.1", RUASocketEnvironment),
+        EnvironmentPlugin("rua.socket", "rua", "rua-robot/1.0-adapter/0.1", RUASocketEnvironment, restartable=False),
     )

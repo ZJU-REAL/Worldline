@@ -5,11 +5,16 @@ from __future__ import annotations
 import itertools
 import json
 import hashlib
-from dataclasses import dataclass
+import math
+import sqlite3
+import tempfile
+import zlib
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Literal, Mapping, Sequence
 
 from worldline.run import write_json
+from worldline.media import hydrate_media
 
 ExportFormat = Literal["sft", "preference", "rl"]
 
@@ -115,20 +120,33 @@ def _trajectory_path(result: Mapping[str, Any]) -> Path | None:
     return None
 
 
-def load_episodes(inputs: Sequence[Path]) -> tuple[list[Episode], dict[str, int]]:
-    episodes: list[Episode] = []
-    stats = {
-        "results": 0,
-        "loaded": 0,
-        "missing_trajectory": 0,
-        "empty_trajectory": 0,
-        "infra_error": 0,
-        "held_out": 0,
-        "invalid_verdict": 0,
-    }
+def iter_episodes(inputs: Sequence[Path], stats: dict[str, int]) -> Iterator[Episode]:
+    stats.update(
+        {
+            "results": 0,
+            "loaded": 0,
+            "missing_trajectory": 0,
+            "empty_trajectory": 0,
+            "infra_error": 0,
+            "held_out": 0,
+            "invalid_verdict": 0,
+            "superseded": 0,
+            "duplicates": 0,
+            "invalid_trajectory": 0,
+        }
+    )
+    seen = set()
     for result_path in discover_results(inputs):
         stats["results"] += 1
         result = _load_object(result_path)
+        if result.get("counted") is False:
+            stats["superseded"] += 1
+            continue
+        identity = (result.get("trial_id"), result.get("source"))
+        if identity in seen:
+            stats["duplicates"] += 1
+            continue
+        seen.add(identity)
         if result.get("outcome") == "infra_error":
             stats["infra_error"] += 1
             continue
@@ -147,35 +165,49 @@ def load_episodes(inputs: Sequence[Path]) -> tuple[list[Episode], dict[str, int]
             stats["missing_trajectory"] += 1
             continue
         trajectory = _load_object(trajectory_path)
-        if trajectory.get("schema_version") == "worldline.messages/0.1":
-            messages = tuple(trajectory.get("messages") or [])
-        else:
-            messages = atif_messages(trajectory)
+        try:
+            if trajectory.get("schema_version") in {"worldline.messages/0.1", "worldline.messages/0.2"}:
+                messages = tuple(hydrate_media(trajectory.get("messages") or [], Path(result["source"])))
+            else:
+                messages = atif_messages(trajectory)
+            if any(
+                not isinstance(message, dict) or message.get("role") not in {"system", "user", "assistant", "tool"}
+                for message in messages
+            ):
+                raise ValueError("invalid message")
+        except (OSError, ValueError, KeyError, TypeError):
+            stats["invalid_trajectory"] += 1
+            continue
         if not messages:
             stats["empty_trajectory"] += 1
             continue
         reward = result.get("reward")
-        episodes.append(
-            Episode(
-                id=str(result.get("trial_id") or trajectory.get("session_id") or result_path.parent.name),
-                task_id=str(result.get("task_id") or "unknown"),
-                outcome=str(result.get("outcome") or "failure"),
-                reward=float(reward) if isinstance(reward, (int, float)) else 0.0,
-                messages=messages,
-                result_path=str(result_path),
-                trajectory_path=str(trajectory_path),
-                metrics=result.get("metrics") if isinstance(result.get("metrics"), dict) else {},
-                usage=result.get("usage") if isinstance(result.get("usage"), dict) else {},
-                task_version=str(result.get("task_version") or "unversioned"),
-                comparison_key=str(result.get("comparison_key") or ""),
-                split=declared_split,
-                split_group=str(metadata.get("split_group") or result.get("task_id") or "unknown"),
-                seed=task.get("seed", metadata.get("seed", 0)),
-                tools=tuple(trajectory.get("tools") or []),
-            )
-        )
+        if isinstance(reward, bool) or not isinstance(reward, (int, float)) or not math.isfinite(reward):
+            stats["invalid_verdict"] += 1
+            continue
         stats["loaded"] += 1
-    return episodes, stats
+        yield Episode(
+            id=str(result.get("trial_id") or trajectory.get("session_id") or result_path.parent.name),
+            task_id=str(result.get("task_id") or "unknown"),
+            outcome=str(result.get("outcome") or "failure"),
+            reward=float(reward) if isinstance(reward, (int, float)) else 0.0,
+            messages=messages,
+            result_path=str(result_path),
+            trajectory_path=str(trajectory_path),
+            metrics=result.get("metrics") if isinstance(result.get("metrics"), dict) else {},
+            usage=result.get("usage") if isinstance(result.get("usage"), dict) else {},
+            task_version=str(result.get("task_version") or "unversioned"),
+            comparison_key=str(result.get("comparison_key") or ""),
+            split=declared_split,
+            split_group=str(metadata.get("split_group") or result.get("task_id") or "unknown"),
+            seed=task.get("seed", metadata.get("seed", 0)),
+            tools=tuple(trajectory.get("tools") or []),
+        )
+
+
+def load_episodes(inputs: Sequence[Path]) -> tuple[list[Episode], dict[str, int]]:
+    stats: dict[str, int] = {}
+    return list(iter_episodes(inputs, stats)), stats
 
 
 def _sft(episodes: Iterable[Episode], include_failures: bool) -> Iterator[dict[str, Any]]:
@@ -219,73 +251,131 @@ def _rl(episodes: Iterable[Episode]) -> Iterator[dict[str, Any]]:
         }
 
 
-def _preference(episodes: Iterable[Episode], max_pairs_per_task: int) -> Iterator[dict[str, Any]]:
-    by_task: dict[tuple, list[Episode]] = {}
-    for episode in episodes:
+class PreferenceSpool:
+    """Disk-backed pairing: RAM scales with one chosen/rejected pair."""
+
+    def __init__(self, path: Path):
+        self.db = sqlite3.connect(path)
+        self.db.execute("CREATE TABLE episodes (group_key TEXT, id TEXT, outcome TEXT, value BLOB)")
+        self.db.execute("CREATE INDEX pairing ON episodes(group_key, outcome, id)")
+
+    def add(self, episode: Episode):
         prompt = tuple(itertools.takewhile(lambda m: m.get("role") != "assistant", episode.messages))
-        prompt_key = json.dumps(prompt, sort_keys=True, ensure_ascii=False)
-        key = (episode.task_id, episode.task_version, episode.seed, episode.comparison_key, prompt_key)
-        by_task.setdefault(key, []).append(episode)
-    for key, task_episodes in sorted(by_task.items()):
-        task_id = key[0]
-        chosen = sorted((e for e in task_episodes if e.outcome == "success"), key=lambda e: e.id)
-        rejected = sorted((e for e in task_episodes if e.outcome == "failure"), key=lambda e: e.id)
-        for index, (positive, negative) in enumerate(itertools.product(chosen, rejected)):
-            if index >= max_pairs_per_task:
-                break
-            yield {
-                "id": f"{task_id}:{positive.id}>{negative.id}",
-                "task_id": task_id,
-                "chosen": positive.messages,
-                "rejected": negative.messages,
-                "chosen_reward": positive.reward,
-                "rejected_reward": negative.reward,
-                "task_version": positive.task_version,
-                "seed": positive.seed,
-                "split": positive.split,
-                "split_group": positive.split_group,
-                "provenance": {
-                    "chosen_result": positive.result_path,
-                    "rejected_result": negative.result_path,
-                },
-            }
+        key = (episode.task_id, episode.task_version, episode.seed, episode.comparison_key, prompt)
+        digest = hashlib.sha256(json.dumps(key, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        value = zlib.compress(json.dumps(asdict(episode), ensure_ascii=False).encode())
+        self.db.execute("INSERT INTO episodes VALUES (?, ?, ?, ?)", (digest, episode.id, episode.outcome, value))
+
+    def records(self, maximum: int):
+        self.db.commit()
+        for (group,) in self.db.execute("SELECT DISTINCT group_key FROM episodes ORDER BY group_key"):
+            count = 0
+            for (chosen,) in self.db.execute(
+                "SELECT value FROM episodes WHERE group_key=? AND outcome='success' ORDER BY id", (group,)
+            ):
+                positive = json.loads(zlib.decompress(chosen))
+                for (rejected,) in self.db.execute(
+                    "SELECT value FROM episodes WHERE group_key=? AND outcome='failure' ORDER BY id", (group,)
+                ):
+                    if count >= maximum:
+                        break
+                    negative = json.loads(zlib.decompress(rejected))
+                    count += 1
+                    yield {
+                        "id": f"{positive['task_id']}:{positive['id']}>{negative['id']}",
+                        "task_id": positive["task_id"],
+                        "chosen": positive["messages"],
+                        "rejected": negative["messages"],
+                        "chosen_reward": positive["reward"],
+                        "rejected_reward": negative["reward"],
+                        "task_version": positive["task_version"],
+                        "seed": positive["seed"],
+                        "split": positive["split"],
+                        "split_group": positive["split_group"],
+                        "tools": positive["tools"],
+                        "provenance": {
+                            "chosen_result": positive["result_path"],
+                            "rejected_result": negative["result_path"],
+                        },
+                    }
+                if count >= maximum:
+                    break
+
+    def close(self):
+        self.db.close()
+
+
+def export_datasets(
+    inputs: Sequence[Path], outputs: Mapping[str, Path], *, include_failures=False, max_pairs_per_task=50
+) -> dict[str, dict[str, Any]]:
+    """Read each trajectory once and publish requested views after completion."""
+    if not outputs or any(name not in {"sft", "rl", "preference"} for name in outputs):
+        raise ValueError("unsupported export format")
+    if max_pairs_per_task < 1:
+        raise ValueError("max_pairs_per_task must be positive")
+    outputs = {name: path.resolve() for name, path in outputs.items()}
+    counts = {name: 0 for name in outputs}
+    stats: dict[str, int] = {}
+    streams, temporary = {}, {}
+    with tempfile.TemporaryDirectory(prefix="worldline-pairs-") as directory:
+        spool = PreferenceSpool(Path(directory) / "pairs.sqlite") if "preference" in outputs else None
+        try:
+            for name, output in outputs.items():
+                output.parent.mkdir(parents=True, exist_ok=True)
+                stream = tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", dir=output.parent, prefix=f".{output.name}.", delete=False
+                )
+                streams[name], temporary[name] = stream, Path(stream.name)
+
+            def append(name, record):
+                streams[name].write(
+                    json.dumps(record, ensure_ascii=False, allow_nan=False, separators=(",", ":")) + "\n"
+                )
+                counts[name] += 1
+
+            for episode in iter_episodes(inputs, stats):
+                if "sft" in outputs:
+                    for record in _sft([episode], include_failures):
+                        append("sft", record)
+                if "rl" in outputs:
+                    append("rl", next(_rl([episode])))
+                if spool is not None:
+                    spool.add(episode)
+            if spool is not None:
+                for record in spool.records(max_pairs_per_task):
+                    append("preference", record)
+            for name, stream in streams.items():
+                stream.close()
+                temporary[name].replace(outputs[name])
+        finally:
+            if spool is not None:
+                spool.close()
+            for stream in streams.values():
+                stream.close()
+            for path in temporary.values():
+                path.unlink(missing_ok=True)
+    manifests = {}
+    for name, output in outputs.items():
+        manifest = {
+            "schema_version": "worldline.dataset/0.1",
+            "format": name,
+            "records": counts[name],
+            "inputs": [str(path.resolve()) for path in inputs],
+            "load_stats": stats,
+            "options": {"include_failures": include_failures, "max_pairs_per_task": max_pairs_per_task},
+            "pipeline": "single-pass-streaming-with-disk-pairing",
+        }
+        write_json(output.with_suffix(output.suffix + ".manifest.json"), manifest)
+        manifests[name] = manifest
+    return manifests
 
 
 def export_dataset(
-    inputs: Sequence[Path],
-    output: Path,
-    *,
-    format: ExportFormat,
-    include_failures: bool = False,
-    max_pairs_per_task: int = 50,
+    inputs: Sequence[Path], output: Path, *, format: ExportFormat, include_failures=False, max_pairs_per_task=50
 ) -> dict[str, Any]:
-    episodes, load_stats = load_episodes(inputs)
-    if format == "sft":
-        records = _sft(episodes, include_failures)
-    elif format == "preference":
-        records = _preference(episodes, max_pairs_per_task)
-    elif format == "rl":
-        records = _rl(episodes)
-    else:
-        raise ValueError(f"unsupported export format: {format}")
-
-    output = output.resolve()
-    output.parent.mkdir(parents=True, exist_ok=True)
-    count = 0
-    with output.open("w", encoding="utf-8") as stream:
-        for record in records:
-            stream.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
-            count += 1
-    manifest = {
-        "schema_version": "worldline.dataset/0.1",
-        "format": format,
-        "records": count,
-        "inputs": [str(path.resolve()) for path in inputs],
-        "load_stats": load_stats,
-        "options": {"include_failures": include_failures, "max_pairs_per_task": max_pairs_per_task},
-    }
-    write_json(output.with_suffix(output.suffix + ".manifest.json"), manifest)
-    return manifest
+    return export_datasets(
+        inputs, {format: output}, include_failures=include_failures, max_pairs_per_task=max_pairs_per_task
+    )[format]
 
 
 def _record_task_id(record: Mapping[str, Any]) -> str | None:
@@ -327,16 +417,15 @@ def split_dataset(
     seed: str = "worldline-v1",
 ) -> dict[str, Any]:
     ratios = (train_ratio, validation_ratio, test_ratio)
-    if any(ratio < 0 for ratio in ratios) or abs(sum(ratios) - 1.0) > 1e-9:
+    if any(not math.isfinite(ratio) or ratio < 0 for ratio in ratios) or abs(sum(ratios) - 1.0) > 1e-9:
         raise ValueError("train, validation, and test ratios must be non-negative and sum to 1")
     input_path = input_path.resolve()
     output_dir = output_dir.resolve()
     names = ("train", "validation", "test")
     counts = {name: 0 for name in names}
     tasks: dict[str, str] = {}
-    records = list(_jsonl(input_path))
     declarations: dict[str, str] = {}
-    for line_number, record in records:
+    for line_number, record in _jsonl(input_path):
         if not _record_task_id(record):
             raise ValueError(f"{input_path}:{line_number}: record has no task_id")
         group = _record_group(record)
@@ -348,7 +437,7 @@ def split_dataset(
     output_dir.mkdir(parents=True, exist_ok=True)
     streams = {name: (output_dir / f"{name}.jsonl").open("w", encoding="utf-8") for name in names}
     try:
-        for line_number, record in records:
+        for line_number, record in _jsonl(input_path):
             task_id = _record_task_id(record)
             if not task_id:
                 raise ValueError(f"{input_path}:{line_number}: record has no task_id")
@@ -389,8 +478,7 @@ def validate_datasets(paths: Sequence[Path]) -> dict[str, Any]:
         groups: set[str] = set()
         count = 0
         try:
-            records = _jsonl(path)
-            for line_number, record in records:
+            for line_number, record in _jsonl(path):
                 count += 1
                 record_id = record.get("id")
                 if isinstance(record_id, str):

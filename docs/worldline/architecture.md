@@ -22,13 +22,15 @@ flowchart LR
 | 目录 | 职责 | 适合承担的工作 |
 | --- | --- | --- |
 | `worldline/contracts.py`、`tasks.py`、`plugins.py`、`errors.py` | 跨领域契约、原生任务、插件发现和错误分类 | 平台契约与兼容性维护 |
-| `worldline/runtime/` | 创建/回收环境进程、预算、session、受控并发 | 环境基础设施与调度 |
+| `worldline/runtime/` | 环境进程、预算、session、持久化队列/恢复、资源 admission | 环境基础设施与调度 |
 | `worldline/agents/` | 模型 API、工具决策、对话记录 | Harness、规划、记忆和 Agent 方法 |
 | `worldline/domains/rua/` | RUA 环境实现、动作语义和开发参考策略 | 机器人环境与验证器 |
+| `worldline/domains/cua/`、`worldline/adapters/browsergym.py` | CUA 插件与 BrowserGym 协议/任务适配 | 浏览器环境与验证器 |
 | `worldline/adapters/` | Harbor/EFE、RUA 任务目录与既有协议转换 | 外部系统接入 |
 | `worldline/datasets.py`、`distill.py` | 轨迹转换、偏好配对、数据划分与校验 | 数据与蒸馏方法 |
 | `worldline/learning/` | 训练输入校验、作业清单、独立训练进程 | SFT/RL 后端与训练方法 |
 | `worldline/trace.py`、`run.py`、`results.py`、`report.py` | 事件、结果、证据、成本和实验报告 | 可观测性与评测分析 |
+| `worldline/media.py` | 内容寻址二进制资产与完整性校验 | 视觉轨迹与数据存储 |
 | `examples/rua/` | 可运行的原生集成示例与训练配置 | 开发与文档验证 |
 | `tests/` | 平台、适配器、真实模拟器和数据边界测试 | 对应模块共同维护 |
 | `tasks/`、`images/`、`embodied_first_exam/` | 继承的 EFE benchmark 层 | 按 EFE 协议维护 |
@@ -65,13 +67,13 @@ Python 接口 `evaluate_native(..., agent_factory=...)` 接受任意满足 `Agen
 
 原生模型 Agent 只获得 observe、act、reset 和 finish。环境在新进程运行，评分走单独的运行器通道；输入错误可作为工具反馈，模型/任务预算耗尽仍对已有最终状态判分。环境崩溃、模型 API 故障、缺少可信 verdict 归入 `infra_error`，不计入 Agent 成功率分母。
 
-请求卡死时运行器终止整个环境进程组，避免超时动作继续执行；无法再取得可信最终状态时记录基础设施错误。正常结束、初始化失败和异常路径都回收 worker。并发是独立 session 的有界线程调度，不提供 GPU 自动分配，GPU 任务默认从单 worker 开始。
+请求卡死时运行器终止整个环境进程组，避免超时动作继续执行；无法再取得可信最终状态时记录基础设施错误。正常结束、初始化失败和异常路径都回收 worker。并发由固定 worker 数领取持久化队列；CPU admission 与显式 GPU device lease 限制同时运行量。这是单机调度，不是 cgroup enforcement 或分布式调度。GPU renderer 的设备映射仍应由对应环境负责。
 
 进程边界适合模型仅使用公开工具的开发实验；Python Agent 插件属于可信代码，进程隔离不构成任意恶意代码的 OS 安全沙盒。执行不可信代码的 benchmark 使用 Harbor 容器、独立 verifier 和 EFE 的网络/资源约束。原生示例的结果单独报告，不属于 EFE 正式成绩。
 
 ## 数据与复评
 
-原生消息保留工具调用、工具响应和多模态内容。SFT 默认仅成功轨迹；preference 配对还要求任务版本、种子、比较配置及初始 prompt 相同；RL 保留成功/失败轨迹和可信 reward。基础设施错误和显式 `test/evaluation/held_out` 轨迹不进入训练导出。
+原生消息保留工具调用、工具响应和多模态内容；`worldline.messages/0.2` 的二进制通过内容寻址引用保存，兼容读取 0.1，导出时校验 hash 并恢复。trace 按事件批量同步，在 run 边界强制同步。SFT 默认仅成功轨迹；preference 配对还要求任务版本、种子、比较配置及初始 prompt 相同；RL 保留成功/失败轨迹和可信 reward。基础设施错误和显式 `test/evaluation/held_out` 轨迹不进入训练导出。
 
 `split_group` 将演示改写、场景变体和恢复分支绑定；显式 train/validation/test 划分优先于哈希划分，冲突直接失败。原始 benchmark 未声明 split 的历史轨迹不能自动证明训练准入，使用者应先补充并审核数据清单。训练入口拒绝 held-out/validation 记录进入 train，并校验跨文件 task/group 重叠。
 

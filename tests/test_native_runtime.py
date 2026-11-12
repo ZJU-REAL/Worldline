@@ -66,6 +66,23 @@ class NativeTaskTest(unittest.TestCase):
 
 @unittest.skipUnless(MUJOCO, "install Worldline's rua extra to run real simulator tests")
 class MujocoRuntimeTest(unittest.TestCase):
+    def test_provider_failure_after_verified_success_does_not_void_success(self):
+        from worldline.errors import ModelAPIError
+
+        class LateProviderFailure(ReachReferenceAgent):
+            def run(self, task, sandbox):
+                super().run(task, sandbox)
+                self.messages.pop()  # The last tool observation is still a valid recorded outcome.
+                raise ModelAPIError("late provider outage", status=503)
+
+        with tempfile.TemporaryDirectory() as temp:
+            _, directory = evaluate_native(
+                EXAMPLE, agent_factory=LateProviderFailure, agent_name="test", runs_dir=Path(temp)
+            )
+            result = json.loads((directory / "result.normalized.json").read_text())
+            self.assertEqual(result["outcome"], "success")
+            self.assertFalse(result["retryable"])
+
     def test_stuck_worker_is_killed_at_request_deadline(self):
         with tempfile.TemporaryDirectory() as temp:
             worker = ProcessEnvironment(load_native_task(EXAMPLE), Path(temp))
