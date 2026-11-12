@@ -1,0 +1,23 @@
+name: Worldline platform
+
+on:
+  push:
+    paths: ['worldline/**', 'tests/**', 'examples/**', 'pyproject.toml', '.github/workflows/worldline.yml']
+  pull_request:
+    paths: ['worldline/**', 'tests/**', 'examples/**', 'pyproject.toml', '.github/workflows/worldline.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  platform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e '.[rua,dev]'
+      - run: python3 -m unittest discover -s tests -v
+      - run: ruff check worldline tests
+      - run: ruff format --check worldline tests

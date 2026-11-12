@@ -1,0 +1,15 @@
+schema_version = "worldline.training/0.1"
+
+[trainer]
+backend = "transformers-sft"
+model = "Qwen/Qwen2.5-0.5B-Instruct"
+train_file = "../../datasets/rua-v1/splits/sft/train.jsonl"
+validation_file = "../../datasets/rua-v1/splits/sft/validation.jsonl"
+output_dir = "../../models/rua-sft-v1"
+jobs_dir = "../../runs/training"
+epochs = 1
+batch_size = 1
+gradient_accumulation_steps = 8
+max_length = 4096
+learning_rate = 0.00002
+seed = 7

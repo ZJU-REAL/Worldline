@@ -1,0 +1,250 @@
+{
+  "checked_at": "2026-11-13",
+  "timezone": "Asia/Hong_Kong",
+  "discovery": [
+    "https://github.com/kairunwen/Awesome-Robot-Use-Agent",
+    "arXiv API: robot-use, robot-use agents, harness AND cs.RO; descending submittedDate"
+  ],
+  "sources": [
+    {
+      "url": "https://arxiv.org/abs/2610.02459",
+      "title": "OpenRUA: Robot-Use Agents Are Zero-Shot Visuomotor Policies",
+      "first_submitted": "2026-10-01",
+      "current_version": 1,
+      "latest_updated": "2026-10-01",
+      "verification_scope": "Primary arXiv abstract and version metadata; performance not independently reproduced"
+    },
+    {
+      "url": "https://arxiv.org/abs/2610.01939",
+      "title": "Fewer Tokens, Better Action: GPT-6 Astra Robot Agents with 14% Higher Success Rate but 65% Fewer Tokens",
+      "first_submitted": "2026-10-01",
+      "current_version": 2,
+      "latest_updated": "2026-10-13",
+      "verification_scope": "Primary arXiv abstract and version metadata; performance not independently reproduced"
+    },
+    {
+      "url": "https://arxiv.org/abs/2606.18363",
+      "title": "Guava: Distilling Frontier VLMs into a Compact Agent through a Robotic Manipulation Harness",
+      "first_submitted": "2026-06-16",
+      "current_version": 3,
+      "latest_updated": "2026-09-29",
+      "verification_scope": "Primary arXiv abstract and version metadata; performance not independently reproduced"
+    },
+    {
+      "url": "https://arxiv.org/abs/2610.10498",
+      "title": "EmbodiedRSI: Active Continual Robot Learning Through Hypothesis-Guided Co-Evolution",
+      "first_submitted": "2026-10-07",
+      "current_version": 1,
+      "latest_updated": "2026-10-07",
+      "verification_scope": "Primary arXiv abstract and version metadata; performance not independently reproduced"
+    },
+    {
+      "url": "https://arxiv.org/abs/2610.04929",
+      "title": "RobotUse: Allocating Computation, Context, and Decisions",
+      "first_submitted": "2026-10-04",
+      "current_version": 2,
+      "latest_updated": "2026-10-06",
+      "verification_scope": "Primary arXiv abstract and version metadata; performance not independently reproduced"
+    },
+    {
+      "url": "https://arxiv.org/abs/2611.01560",
+      "title": "Democratizing Robot-Use Agents: A Unified Harness with Open Models",
+      "first_submitted": "2026-11-01",
+      "current_version": 2,
+      "latest_updated": "2026-11-03",
+      "verification_scope": "Primary arXiv abstract and version metadata; performance not independently reproduced"
+    },
+    {
+      "url": "https://arxiv.org/abs/2611.04226",
+      "title": "DiMuRe: Diagnosis-Guided Multilevel Recovery for Robotic Task Execution",
+      "first_submitted": "2026-11-03",
+      "current_version": 1,
+      "latest_updated": "2026-11-03",
+      "verification_scope": "Primary arXiv abstract and version metadata; performance not independently reproduced"
+    },
+    {
+      "url": "https://arxiv.org/abs/2610.10409",
+      "title": "RobotWorld: Benchmarking Multimodal Agents for Robot Use Across Diverse Tasks and Embodiments",
+      "first_submitted": "2026-10-07",
+      "current_version": 1,
+      "latest_updated": "2026-10-07",
+      "verification_scope": "Primary arXiv abstract and version metadata; performance not independently reproduced"
+    },
+    {
+      "url": "https://arxiv.org/abs/2610.16238",
+      "title": "Embodied Skill Bench: Benchmarking How Well Agents with Embodied Skills Perform on Physical Tasks",
+      "first_submitted": "2026-10-12",
+      "current_version": 1,
+      "latest_updated": "2026-10-12",
+      "verification_scope": "Primary arXiv abstract and version metadata; performance not independently reproduced"
+    },
+    {
+      "url": "https://arxiv.org/abs/2610.23372",
+      "title": "Beyond Success Rate: Interventional Evaluation of Memory in Vision-Language-Action Systems",
+      "first_submitted": "2026-10-16",
+      "current_version": 1,
+      "latest_updated": "2026-10-16",
+      "verification_scope": "Primary arXiv abstract and version metadata; performance not independently reproduced"
+    },
+    {
+      "url": "https://arxiv.org/abs/2610.20442",
+      "title": "Towards Agentic Robots: Model, Data, Environment, and Harness",
+      "first_submitted": "2026-10-14",
+      "current_version": 1,
+      "latest_updated": "2026-10-14",
+      "verification_scope": "Primary arXiv abstract and version metadata; performance not independently reproduced"
+    },
+    {
+      "url": "https://arxiv.org/abs/2610.30108",
+      "title": "Multimodal Embodied Agents: A Unified Capability-centric Perspective from Computer-Use to Robot-Use",
+      "first_submitted": "2026-10-21",
+      "current_version": 1,
+      "latest_updated": "2026-10-21",
+      "verification_scope": "Primary arXiv abstract and version metadata; performance not independently reproduced"
+    },
+    {
+      "url": "https://arxiv.org/abs/2609.33378",
+      "title": "Recursive Harness Distillation across Agents for Robot Manipulation",
+      "first_submitted": "2026-09-27",
+      "current_version": 1,
+      "latest_updated": "2026-09-27",
+      "verification_scope": "Primary arXiv abstract and version metadata; performance not independently reproduced"
+    },
+    {
+      "url": "https://arxiv.org/abs/2609.40306",
+      "title": "DynaHarness: A Dynamic Physical Harness for Self-Evolving Robot Agents",
+      "first_submitted": "2026-09-30",
+      "current_version": 1,
+      "latest_updated": "2026-09-30",
+      "verification_scope": "Primary arXiv abstract and version metadata; performance not independently reproduced"
+    },
+    {
+      "url": "https://arxiv.org/abs/2607.16636",
+      "title": "PhyAgentOS: A Self-Evolving Operating System for Embodied Agents with Decoupled Cognitive Planning and Physical Execution",
+      "first_submitted": "2026-07-18",
+      "current_version": 1,
+      "latest_updated": "2026-07-18",
+      "verification_scope": "Primary arXiv abstract and version metadata; performance not independently reproduced"
+    },
+    {
+      "url": "https://arxiv.org/abs/2609.32862",
+      "title": "RoboFoundry: System-as-Policy Evolution for Self-Learning Embodied Agents",
+      "first_submitted": "2026-09-26",
+      "current_version": 1,
+      "latest_updated": "2026-09-26",
+      "verification_scope": "Primary arXiv abstract and version metadata; performance not independently reproduced"
+    },
+    {
+      "url": "https://arxiv.org/abs/2610.12369",
+      "title": "Embodied Turing Machines: Stateful Code for Robot Recursive Self-Improvement",
+      "first_submitted": "2026-10-08",
+      "current_version": 1,
+      "latest_updated": "2026-10-08",
+      "verification_scope": "Primary arXiv abstract and version metadata; performance not independently reproduced"
+    },
+    {
+      "url": "https://arxiv.org/abs/2611.14115",
+      "title": "LEASH: Stay Safe in Agentic Robotics",
+      "first_submitted": "2026-11-10",
+      "current_version": 1,
+      "latest_updated": "2026-11-10",
+      "verification_scope": "Primary arXiv abstract and version metadata; performance not independently reproduced"
+    },
+    {
+      "url": "https://arxiv.org/abs/2611.13034",
+      "title": "RoboACE: Adversarial Co-Evolution for Robot Self-Improvement",
+      "first_submitted": "2026-11-09",
+      "current_version": 1,
+      "latest_updated": "2026-11-09",
+      "verification_scope": "Primary arXiv abstract and version metadata; performance not independently reproduced"
+    },
+    {
+      "url": "https://arxiv.org/abs/2611.11509",
+      "title": "Review the Episodes, Refine the Lessons: Simple Memory Evolution for Embodied Agents",
+      "first_submitted": "2026-11-08",
+      "current_version": 1,
+      "latest_updated": "2026-11-08",
+      "verification_scope": "Primary arXiv abstract and version metadata; performance not independently reproduced"
+    },
+    {
+      "url": "https://arxiv.org/abs/2611.10748",
+      "title": "REINS: A Self-Evolving Agent Harness for Real-Time Trajectory Planning",
+      "first_submitted": "2026-11-07",
+      "current_version": 1,
+      "latest_updated": "2026-11-07",
+      "verification_scope": "Primary arXiv abstract and version metadata; performance not independently reproduced"
+    },
+    {
+      "url": "https://arxiv.org/abs/2611.09892",
+      "title": "On Agentic Manipulation Policies",
+      "first_submitted": "2026-11-06",
+      "current_version": 1,
+      "latest_updated": "2026-11-06",
+      "verification_scope": "Primary arXiv abstract and version metadata; performance not independently reproduced"
+    },
+    {
+      "url": "https://arxiv.org/abs/2611.08039",
+      "title": "HITCH: Teaching a Vision-Language Model to Operate a Humanoid through a Whole-Body Harness",
+      "first_submitted": "2026-11-05",
+      "current_version": 1,
+      "latest_updated": "2026-11-05",
+      "verification_scope": "Primary arXiv abstract and version metadata; performance not independently reproduced"
+    },
+    {
+      "url": "https://arxiv.org/abs/2611.06881",
+      "title": "VABAR: A Variational Automation Benchmark for Agentic Robotics",
+      "first_submitted": "2026-11-04",
+      "current_version": 1,
+      "latest_updated": "2026-11-04",
+      "verification_scope": "Primary arXiv abstract and version metadata; performance not independently reproduced"
+    },
+    {
+      "url": "https://arxiv.org/abs/2611.04080",
+      "title": "FEIJOA: Task-Driven Grounding and Execution for Mobile Manipulation",
+      "first_submitted": "2026-11-02",
+      "current_version": 1,
+      "latest_updated": "2026-11-02",
+      "verification_scope": "Primary arXiv abstract and version metadata; performance not independently reproduced"
+    },
+    {
+      "url": "https://arxiv.org/abs/2611.01404",
+      "title": "Serving Agentic Robot Fleets: Workload Characterization, KV-Cache Thrashing, and Admission Control",
+      "first_submitted": "2026-11-01",
+      "current_version": 1,
+      "latest_updated": "2026-11-01",
+      "verification_scope": "Primary arXiv abstract and version metadata; performance not independently reproduced"
+    },
+    {
+      "url": "https://arxiv.org/abs/2610.41216",
+      "title": "TinyAstral: Transferring Self-Evolving Harnesses to Tiny Generalist Manipulation Agents",
+      "first_submitted": "2026-10-30",
+      "current_version": 1,
+      "latest_updated": "2026-10-30",
+      "verification_scope": "Primary arXiv abstract and version metadata; performance not independently reproduced"
+    },
+    {
+      "url": "https://arxiv.org/abs/2610.40799",
+      "title": "CaPtain: A Pipeline for Post-Training Code-as-Policy Robot Agents",
+      "first_submitted": "2026-10-29",
+      "current_version": 1,
+      "latest_updated": "2026-10-29",
+      "verification_scope": "Primary arXiv abstract and version metadata; performance not independently reproduced"
+    },
+    {
+      "url": "https://arxiv.org/abs/2611.00896",
+      "title": "Verifying Test-State Identity in Paired Evaluation of Vision-Language-Action Models",
+      "first_submitted": "2026-10-31",
+      "current_version": 1,
+      "latest_updated": "2026-10-31",
+      "verification_scope": "Primary arXiv abstract and version metadata; performance not independently reproduced"
+    },
+    {
+      "url": "https://arxiv.org/abs/2611.08946",
+      "title": "Flex-RSI: Benchmarking Recursive Self-Improvement of Frontier Agents",
+      "first_submitted": "2026-11-06",
+      "current_version": 1,
+      "latest_updated": "2026-11-06",
+      "verification_scope": "Primary arXiv abstract and version metadata; performance not independently reproduced"
+    }
+  ]
+}

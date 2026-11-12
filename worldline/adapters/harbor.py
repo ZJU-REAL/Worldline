@@ -17,7 +17,13 @@ def load_task(task_dir: Path) -> Task:
         config = tomllib.load(stream)
 
     task_config = config.get("task", {})
-    metadata = config.get("metadata", {})
+    metadata = dict(config.get("metadata", {}))
+    # Older EFE checkouts declare mode in the directory suffix, not metadata.
+    if "mode" not in metadata:
+        for mode in ("standard-realtime", "privileged", "standard"):
+            if task_dir.name.endswith("-" + mode):
+                metadata["mode"] = mode
+                break
     digest_path = task_dir / "DIGEST"
     version = digest_path.read_text(encoding="utf-8").strip() if digest_path.exists() else "unversioned"
 
@@ -27,6 +33,6 @@ def load_task(task_dir: Path) -> Task:
         environment=str(task_dir),
         version=version,
         split=metadata.get("split", "unspecified"),
-        seed=metadata.get("seeds", {}).get("default", 0),
+        seed=metadata.get("seeds", {}).get("default", metadata.get("instance_seed", 0)),
         metadata=metadata,
     )

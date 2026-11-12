@@ -9,6 +9,11 @@ __pycache__/
 /exps/
 /jobs/
 /runs/
+/datasets/
+/models/
+/reports/
+.ruff_cache/
+/dist/
 *.log
 nohup.out
 # secrets

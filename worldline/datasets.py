@@ -25,6 +25,12 @@ class Episode:
     trajectory_path: str
     metrics: Mapping[str, float]
     usage: Mapping[str, float]
+    task_version: str = "unversioned"
+    comparison_key: str = ""
+    split: str = "unspecified"
+    split_group: str = ""
+    seed: int = 0
+    tools: tuple[Mapping[str, Any], ...] = ()
 
 
 def _load_object(path: Path) -> dict[str, Any]:
@@ -111,19 +117,40 @@ def _trajectory_path(result: Mapping[str, Any]) -> Path | None:
 
 def load_episodes(inputs: Sequence[Path]) -> tuple[list[Episode], dict[str, int]]:
     episodes: list[Episode] = []
-    stats = {"results": 0, "loaded": 0, "missing_trajectory": 0, "empty_trajectory": 0, "infra_error": 0}
+    stats = {
+        "results": 0,
+        "loaded": 0,
+        "missing_trajectory": 0,
+        "empty_trajectory": 0,
+        "infra_error": 0,
+        "held_out": 0,
+        "invalid_verdict": 0,
+    }
     for result_path in discover_results(inputs):
         stats["results"] += 1
         result = _load_object(result_path)
         if result.get("outcome") == "infra_error":
             stats["infra_error"] += 1
             continue
+        if result.get("outcome") not in {"success", "failure"}:
+            stats["invalid_verdict"] += 1
+            continue
+        task = _load_object(result_path.parent / "task.json")
+        run = _load_object(result_path.parent / "run.json")
+        metadata = {**(run.get("metadata") or {}), **(task.get("metadata") or {})}
+        declared_split = task.get("split", metadata.get("split", "unspecified"))
+        if declared_split in {"test", "evaluation", "held_out"}:
+            stats["held_out"] += 1
+            continue
         trajectory_path = _trajectory_path(result)
         if trajectory_path is None:
             stats["missing_trajectory"] += 1
             continue
         trajectory = _load_object(trajectory_path)
-        messages = atif_messages(trajectory)
+        if trajectory.get("schema_version") == "worldline.messages/0.1":
+            messages = tuple(trajectory.get("messages") or [])
+        else:
+            messages = atif_messages(trajectory)
         if not messages:
             stats["empty_trajectory"] += 1
             continue
@@ -139,6 +166,12 @@ def load_episodes(inputs: Sequence[Path]) -> tuple[list[Episode], dict[str, int]
                 trajectory_path=str(trajectory_path),
                 metrics=result.get("metrics") if isinstance(result.get("metrics"), dict) else {},
                 usage=result.get("usage") if isinstance(result.get("usage"), dict) else {},
+                task_version=str(result.get("task_version") or "unversioned"),
+                comparison_key=str(result.get("comparison_key") or ""),
+                split=declared_split,
+                split_group=str(metadata.get("split_group") or result.get("task_id") or "unknown"),
+                seed=task.get("seed", metadata.get("seed", 0)),
+                tools=tuple(trajectory.get("tools") or []),
             )
         )
         stats["loaded"] += 1
@@ -152,12 +185,17 @@ def _sft(episodes: Iterable[Episode], include_failures: bool) -> Iterator[dict[s
         yield {
             "id": episode.id,
             "messages": episode.messages,
+            "tools": episode.tools,
             "metadata": {
                 "task_id": episode.task_id,
                 "outcome": episode.outcome,
                 "reward": episode.reward,
                 "result_path": episode.result_path,
                 "trajectory_path": episode.trajectory_path,
+                "task_version": episode.task_version,
+                "seed": episode.seed,
+                "split": episode.split,
+                "split_group": episode.split_group,
             },
         }
 
@@ -170,6 +208,11 @@ def _rl(episodes: Iterable[Episode]) -> Iterator[dict[str, Any]]:
             "messages": episode.messages,
             "reward": episode.reward,
             "outcome": episode.outcome,
+            "task_version": episode.task_version,
+            "seed": episode.seed,
+            "split": episode.split,
+            "split_group": episode.split_group,
+            "tools": episode.tools,
             "metrics": episode.metrics,
             "usage": episode.usage,
             "provenance": {"result": episode.result_path, "trajectory": episode.trajectory_path},
@@ -177,10 +220,14 @@ def _rl(episodes: Iterable[Episode]) -> Iterator[dict[str, Any]]:
 
 
 def _preference(episodes: Iterable[Episode], max_pairs_per_task: int) -> Iterator[dict[str, Any]]:
-    by_task: dict[str, list[Episode]] = {}
+    by_task: dict[tuple, list[Episode]] = {}
     for episode in episodes:
-        by_task.setdefault(episode.task_id, []).append(episode)
-    for task_id, task_episodes in sorted(by_task.items()):
+        prompt = tuple(itertools.takewhile(lambda m: m.get("role") != "assistant", episode.messages))
+        prompt_key = json.dumps(prompt, sort_keys=True, ensure_ascii=False)
+        key = (episode.task_id, episode.task_version, episode.seed, episode.comparison_key, prompt_key)
+        by_task.setdefault(key, []).append(episode)
+    for key, task_episodes in sorted(by_task.items()):
+        task_id = key[0]
         chosen = sorted((e for e in task_episodes if e.outcome == "success"), key=lambda e: e.id)
         rejected = sorted((e for e in task_episodes if e.outcome == "failure"), key=lambda e: e.id)
         for index, (positive, negative) in enumerate(itertools.product(chosen, rejected)):
@@ -193,6 +240,10 @@ def _preference(episodes: Iterable[Episode], max_pairs_per_task: int) -> Iterato
                 "rejected": negative.messages,
                 "chosen_reward": positive.reward,
                 "rejected_reward": negative.reward,
+                "task_version": positive.task_version,
+                "seed": positive.seed,
+                "split": positive.split,
+                "split_group": positive.split_group,
                 "provenance": {
                     "chosen_result": positive.result_path,
                     "rejected_result": negative.result_path,
@@ -247,6 +298,14 @@ def _record_task_id(record: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _record_group(record: Mapping[str, Any]) -> str | None:
+    return record.get("split_group") or (record.get("metadata") or {}).get("split_group") or _record_task_id(record)
+
+
+def _record_split(record: Mapping[str, Any]) -> str:
+    return record.get("split") or (record.get("metadata") or {}).get("split") or "unspecified"
+
+
 def _jsonl(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
     with path.open(encoding="utf-8") as stream:
         for line_number, line in enumerate(stream, start=1):
@@ -272,19 +331,34 @@ def split_dataset(
         raise ValueError("train, validation, and test ratios must be non-negative and sum to 1")
     input_path = input_path.resolve()
     output_dir = output_dir.resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
     names = ("train", "validation", "test")
-    streams = {name: (output_dir / f"{name}.jsonl").open("w", encoding="utf-8") for name in names}
     counts = {name: 0 for name in names}
     tasks: dict[str, str] = {}
+    records = list(_jsonl(input_path))
+    declarations: dict[str, str] = {}
+    for line_number, record in records:
+        if not _record_task_id(record):
+            raise ValueError(f"{input_path}:{line_number}: record has no task_id")
+        group = _record_group(record)
+        declared = _record_split(record)
+        if declared in names:
+            if group in declarations and declarations[group] != declared:
+                raise ValueError(f"conflicting declared splits for group {group!r}")
+            declarations[group] = declared
+    output_dir.mkdir(parents=True, exist_ok=True)
+    streams = {name: (output_dir / f"{name}.jsonl").open("w", encoding="utf-8") for name in names}
     try:
-        for line_number, record in _jsonl(input_path):
+        for line_number, record in records:
             task_id = _record_task_id(record)
             if not task_id:
                 raise ValueError(f"{input_path}:{line_number}: record has no task_id")
-            digest = hashlib.sha256(f"{seed}\0{task_id}".encode()).digest()
+            group = _record_group(record)
+            digest = hashlib.sha256(f"{seed}\0{group}".encode()).digest()
             bucket = int.from_bytes(digest[:8], "big") / 2**64
-            split = "train" if bucket < train_ratio else "validation" if bucket < train_ratio + validation_ratio else "test"
+            split = (
+                "train" if bucket < train_ratio else "validation" if bucket < train_ratio + validation_ratio else "test"
+            )
+            split = declarations.get(group, split)
             tasks[task_id] = split
             streams[split].write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
             counts[split] += 1
@@ -307,10 +381,12 @@ def validate_datasets(paths: Sequence[Path]) -> dict[str, Any]:
     errors: list[str] = []
     seen_ids: dict[str, str] = {}
     tasks_by_file: dict[str, set[str]] = {}
+    groups_by_file: dict[str, set[str]] = {}
     record_counts: dict[str, int] = {}
     for raw_path in paths:
         path = raw_path.resolve()
         tasks: set[str] = set()
+        groups: set[str] = set()
         count = 0
         try:
             records = _jsonl(path)
@@ -328,6 +404,9 @@ def validate_datasets(paths: Sequence[Path]) -> dict[str, Any]:
                     errors.append(f"{path}:{line_number}: missing task_id")
                 else:
                     tasks.add(task_id)
+                group = _record_group(record)
+                if group:
+                    groups.add(group)
                 for field in ("messages", "chosen", "rejected"):
                     if field in record and not isinstance(record[field], (list, tuple)):
                         errors.append(f"{path}:{line_number}: {field} must be an array")
@@ -335,6 +414,7 @@ def validate_datasets(paths: Sequence[Path]) -> dict[str, Any]:
             errors.append(str(error))
         key = str(path)
         tasks_by_file[key] = tasks
+        groups_by_file[key] = groups
         record_counts[key] = count
 
     overlaps: list[dict[str, Any]] = []
@@ -344,6 +424,13 @@ def validate_datasets(paths: Sequence[Path]) -> dict[str, Any]:
             overlaps.append({"left": left, "right": right, "tasks": shared})
     if overlaps:
         errors.append(f"task overlap exists between {len(overlaps)} file pairs")
+    group_overlaps = []
+    for (left, left_groups), (right, right_groups) in itertools.combinations(groups_by_file.items(), 2):
+        shared = sorted(left_groups & right_groups)
+        if shared:
+            group_overlaps.append({"left": left, "right": right, "groups": shared})
+    if group_overlaps:
+        errors.append(f"split group overlap exists between {len(group_overlaps)} file pairs")
     return {
         "schema_version": "worldline.validation/0.1",
         "valid": not errors,
@@ -351,4 +438,5 @@ def validate_datasets(paths: Sequence[Path]) -> dict[str, Any]:
         "unique_ids": len(seen_ids),
         "errors": errors,
         "overlaps": overlaps,
+        "group_overlaps": group_overlaps,
     }

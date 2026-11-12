@@ -72,3 +72,24 @@ class Verifier(Protocol):
     """A trusted evaluator isolated from the agent."""
 
     def verify(self, task: Task, run_dir: Path) -> RunResult: ...
+
+
+@runtime_checkable
+class Environment(Protocol):
+    """Trusted worker-side environment. Its verifier is never an agent tool.
+
+    Observations and actions remain domain-defined JSON values. Heavy simulator
+    and trainer dependencies must not be imported by this contract.
+    """
+
+    def spec(self) -> Mapping[str, Any]: ...
+
+    def reset(self, seed: int) -> Any: ...
+
+    def observe(self) -> Any: ...
+
+    def step(self, action: Any) -> Any: ...
+
+    def verify(self) -> RunResult: ...
+
+    def close(self) -> None: ...

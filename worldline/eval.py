@@ -6,13 +6,12 @@ import os
 import shutil
 import subprocess
 import time
-import uuid
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Mapping, Sequence
 
 from worldline.adapters.harbor import load_task
-from worldline.run import RunRecord, write_record
+from worldline.run import RunRecord, write_record, make_run_id
 from worldline.run import write_json
 from worldline.results import normalize_harbor_trial
 from worldline.trace import TraceEvent, TraceWriter
@@ -20,11 +19,6 @@ from worldline.trace import TraceEvent, TraceWriter
 
 class BackendUnavailableError(RuntimeError):
     pass
-
-
-def make_run_id(task_name: str) -> str:
-    slug = task_name.rsplit("/", 1)[-1].replace("_", "-")
-    return f"{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-{slug}-{uuid.uuid4().hex[:8]}"
 
 
 def harbor_command(

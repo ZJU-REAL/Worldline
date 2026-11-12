@@ -64,9 +64,7 @@ class HarborEvaluationTest(unittest.TestCase):
     def test_dry_run_writes_record_and_trace(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            record, run_dir = evaluate_harbor(
-                make_task(root), agent="oracle", runs_dir=root / "runs", dry_run=True
-            )
+            record, run_dir = evaluate_harbor(make_task(root), agent="oracle", runs_dir=root / "runs", dry_run=True)
 
             saved = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
             events = [json.loads(line) for line in (run_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines()]

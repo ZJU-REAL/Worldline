@@ -5,9 +5,15 @@ from __future__ import annotations
 import json
 import os
 import time
+import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
+
+
+def make_run_id(task_name: str) -> str:
+    slug = task_name.rsplit("/", 1)[-1].replace("_", "-")
+    return f"{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-{slug}-{uuid.uuid4().hex[:8]}"
 
 
 @dataclass(frozen=True, slots=True)

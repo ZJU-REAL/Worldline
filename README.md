@@ -48,12 +48,33 @@ Worldline 围绕一条完整链路设计：任务定义运行边界，沙盒承�
 - 接通至少一个开源训练后端；
 - 使用 held-out 任务完成训练后复评。
 
-当前仓库已完整采用 EFE 的目录结构，并新增独立的 `worldline/` 平台层。现阶段已建立 Task、Sandbox、Agent、Verifier 与 Trace 的基础接口，以及 Harbor/EFE 任务读取适配器；原有 `efe` 和 `harbor` 运行方式继续保留。
+当前仓库保留 EFE 的任务目录，并新增独立的 `worldline/` 平台层。RUA 已接入真实 MuJoCo 原生环境、
+现有 RUA socket 协议与 Harbor/EFE 任务包；支持模型工具 Agent、独立进程 rollout、可信评分、
+多模态轨迹、蒸馏数据和独立 Transformers SFT 训练入口。完整说明见
+[平台文档](docs/worldline/README.md)、[架构与模块分工](docs/worldline/architecture.md) 和
+[近期 RUA 论文调研](docs/worldline/research/rua-related-work.md)。
+
+先在 CPU 上运行 RUA 闭环：
+
+```bash
+uv venv --python 3.12
+uv pip install -e '.[rua,dev]'
+source .venv/bin/activate
+worldline rollout examples/rua/reach-train examples/rua/reach-test --agent reference --max-workers 2
+worldline rollout examples/rua/reach-train --agent noop
+worldline distill runs/ --output-dir datasets/rua-v1
+worldline train examples/rua/sft.toml --dry-run
+```
+
+这是真实 MuJoCo 的小型平台集成示例，不是正式 benchmark 成绩。显式 test 轨迹不会进入训练导出；
+同源场景与分支通过 `split_group` 保持同集合。接入模型、既有 RUA 资产和实际训练的方法见
+[RUA 使用文档](docs/worldline/rua.md)。核心安装不强制依赖模拟器、Harbor 或训练库，按用途选择 extras；
+模型训练使用 `training` extra，含图像的 SFT 使用支持对应 processor 的外部训练器。
 
 安装后先检查本机是否具备运行条件：
 
 ```bash
-uv tool install -e .
+uv tool install -e '.[harbor]' --with-executables-from harbor
 worldline doctor
 ```
 

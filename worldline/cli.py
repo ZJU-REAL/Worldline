@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from functools import partial
 from pathlib import Path
 from typing import Sequence
 
@@ -16,6 +17,11 @@ from worldline.doctor import doctor
 from worldline.eval import BackendUnavailableError, evaluate_harbor
 from worldline.results import ingest_harbor_trial
 from worldline.report import write_report
+from worldline.adapters.rua.catalog import catalog_task_paths, write_catalog
+from worldline.learning.launch import train
+from worldline.plugins import environment_plugins
+from worldline.runtime.batch import evaluate_many_native
+from worldline.tasks import load_native_task
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -23,7 +29,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
 
-    inspect_parser = commands.add_parser("inspect", help="Inspect a Harbor-compatible task")
+    inspect_parser = commands.add_parser("inspect", help="Inspect a native or Harbor-compatible task")
     inspect_parser.add_argument("task_dir", type=Path)
 
     eval_parser = commands.add_parser("eval", help="Evaluate one task and create a Worldline run record")
@@ -82,6 +88,37 @@ def _build_parser() -> argparse.ArgumentParser:
     distill_parser.add_argument("--seed", default="worldline-v1")
     distill_parser.add_argument("--include-failures-in-sft", action="store_true")
     distill_parser.add_argument("--max-pairs-per-task", type=int, default=50)
+
+    commands.add_parser("plugins", help="List available environment plugins without importing simulators")
+    rollout = commands.add_parser("rollout", help="Evaluate native tasks through a registered environment")
+    rollout.add_argument("task_dirs", nargs="+", type=Path)
+    rollout.add_argument("--agent", "-a", choices=("reference", "noop", "openai-compatible"), required=True)
+    rollout.add_argument("--model", "-m")
+    rollout.add_argument("--base-url", default="http://localhost:8000/v1")
+    rollout.add_argument("--api-key-env", default="WORLDLINE_API_KEY")
+    rollout.add_argument("--runs-dir", type=Path, default=Path("runs"))
+    rollout.add_argument("--max-workers", type=int, default=1)
+    rollout.add_argument("--dry-run", action="store_true")
+
+    catalog = commands.add_parser("rua-catalog", help="Index existing RUA/EFE task packages without copying them")
+    catalog.add_argument("root", type=Path)
+    catalog.add_argument("--mode", choices=("privileged", "standard", "standard-realtime"))
+    catalog.add_argument("--split")
+    catalog.add_argument("--benchmark")
+    catalog.add_argument("--output", "-o", type=Path, required=True)
+
+    eval_catalog = commands.add_parser("eval-catalog", help="Evaluate an indexed Harbor task selection")
+    eval_catalog.add_argument("catalog", type=Path)
+    eval_catalog.add_argument("--agent", "-a", required=True)
+    eval_catalog.add_argument("--model", "-m")
+    eval_catalog.add_argument("--runs-dir", type=Path, default=Path("runs"))
+    eval_catalog.add_argument("--max-workers", type=int, default=1)
+    eval_catalog.add_argument("--harbor-executable", default="harbor")
+    eval_catalog.add_argument("--dry-run", action="store_true")
+
+    training = commands.add_parser("train", help="Validate inputs and run an independent training backend")
+    training.add_argument("config", type=Path)
+    training.add_argument("--dry-run", action="store_true")
     return parser
 
 
@@ -89,7 +126,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.command == "inspect":
-        task = load_task(args.task_dir)
+        task = (
+            load_native_task(args.task_dir).task
+            if (args.task_dir / "worldline.toml").is_file()
+            else load_task(args.task_dir)
+        )
         print(
             json.dumps(
                 {
@@ -104,6 +145,61 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         )
         return 0
+    if args.command == "plugins":
+        print(
+            json.dumps(
+                [{"name": p.name, "domain": p.domain, "version": p.version} for p in environment_plugins().values()],
+                indent=2,
+            )
+        )
+        return 0
+    if args.command == "rollout":
+        if args.agent == "openai-compatible":
+            if not args.model:
+                parser.error("openai-compatible requires --model")
+            from worldline.agents.tool_agent import OpenAICompatibleAgent
+
+            factory = partial(
+                OpenAICompatibleAgent, model=args.model, base_url=args.base_url, api_key_env=args.api_key_env
+            )
+        else:
+            from worldline.domains.rua.reference import ReachReferenceAgent
+
+            factory = partial(ReachReferenceAgent, noop=args.agent == "noop")
+        manifest = evaluate_many_native(
+            args.task_dirs,
+            agent_factory=factory,
+            agent_name=args.agent,
+            model=args.model,
+            runs_dir=args.runs_dir,
+            max_workers=args.max_workers,
+            dry_run=args.dry_run,
+        )
+        print(json.dumps(manifest, ensure_ascii=False, indent=2))
+        return 2 if any(manifest["statuses"].get(key) for key in ("error", "infra_error")) else 0
+    if args.command == "rua-catalog":
+        data = write_catalog(args.root, args.output, mode=args.mode, split=args.split, benchmark=args.benchmark)
+        print(json.dumps({"tasks": data["count"], "errors": data["errors"], "output": str(args.output)}, indent=2))
+        return 1 if data["errors"] else 0
+    if args.command == "eval-catalog":
+        manifest = evaluate_many_harbor(
+            catalog_task_paths(args.catalog),
+            agent=args.agent,
+            model=args.model,
+            runs_dir=args.runs_dir,
+            max_workers=args.max_workers,
+            executable=args.harbor_executable,
+            dry_run=args.dry_run,
+        )
+        print(json.dumps(manifest, ensure_ascii=False, indent=2))
+        return 2 if any(manifest["statuses"].get(key) for key in ("error", "infra_error")) else 0
+    if args.command == "train":
+        try:
+            manifest, path = train(args.config, dry_run=args.dry_run)
+        except (ValueError, OSError, KeyError) as error:
+            parser.error(str(error))
+        print(json.dumps({"status": manifest["status"], "manifest": str(path)}, indent=2))
+        return manifest.get("exit_code", 0)
     if args.command == "eval":
         try:
             record, run_dir = evaluate_harbor(
@@ -197,9 +293,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             include_failures_in_sft=args.include_failures_in_sft,
             max_pairs_per_task=args.max_pairs_per_task,
         )
-        print(json.dumps({"output_dir": manifest["output_dir"], "report": manifest["report"], "records": {
-            name: data["export"]["records"] for name, data in manifest["datasets"].items()
-        }}, ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                {
+                    "output_dir": manifest["output_dir"],
+                    "report": manifest["report"],
+                    "records": {name: data["export"]["records"] for name, data in manifest["datasets"].items()},
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         return 0
     return 2
 

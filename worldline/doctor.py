@@ -27,17 +27,27 @@ def doctor(root: Path = Path.cwd()) -> dict[str, Any]:
     checks = {
         "python": {"ok": sys.version_info >= (3, 12), "version": sys.version.split()[0]},
         "uv": {"ok": uv is not None, "path": uv, "version": _version([uv, "--version"]) if uv else None},
-        "harbor": {"ok": harbor is not None, "path": harbor, "version": _version([harbor, "--version"]) if harbor else None},
+        "harbor": {
+            "ok": harbor is not None,
+            "path": harbor,
+            "version": _version([harbor, "--version"]) if harbor else None,
+        },
         "container": {
             "ok": docker is not None or podman is not None,
             "docker": docker,
             "podman": podman,
-            "version": _version([docker, "--version"]) if docker else _version([podman, "--version"]) if podman else None,
+            "version": _version([docker, "--version"])
+            if docker
+            else _version([podman, "--version"])
+            if podman
+            else None,
         },
         "nvidia": {
             "ok": nvidia_smi is not None,
             "path": nvidia_smi,
-            "version": _version([nvidia_smi, "--query-gpu=driver_version", "--format=csv,noheader"]) if nvidia_smi else None,
+            "version": _version([nvidia_smi, "--query-gpu=driver_version", "--format=csv,noheader"])
+            if nvidia_smi
+            else None,
         },
         "repository": {
             "ok": (root / "tasks").is_dir() and (root / "worldline").is_dir(),

@@ -33,9 +33,15 @@ def _sum_numeric(records: Iterable[Mapping[str, Any]], field: str) -> dict[str, 
 
 
 def _summary(records: list[Mapping[str, Any]]) -> dict[str, Any]:
-    outcomes = {name: sum(record.get("outcome") == name for record in records) for name in ("success", "failure", "infra_error")}
+    outcomes = {
+        name: sum(record.get("outcome") == name for record in records) for name in ("success", "failure", "infra_error")
+    }
     counted = outcomes["success"] + outcomes["failure"]
-    rewards = [float(record["reward"]) for record in records if isinstance(record.get("reward"), (int, float))]
+    rewards = [
+        float(record["reward"])
+        for record in records
+        if record.get("outcome") in {"success", "failure"} and isinstance(record.get("reward"), (int, float))
+    ]
     return {
         "trials": len(records),
         "counted_trials": counted,
@@ -53,9 +59,13 @@ def build_report(inputs: Sequence[Path]) -> dict[str, Any]:
     records = [record for record in records if record]
     by_task: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     by_configuration: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    by_agent: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for record in records:
         by_task[str(record.get("task_id") or "unknown")].append(record)
-        by_configuration[str(record.get("comparison_key") or f"{record.get('task_id') or 'unknown'}@unversioned")].append(record)
+        by_configuration[
+            str(record.get("comparison_key") or f"{record.get('task_id') or 'unknown'}@unversioned")
+        ].append(record)
+        by_agent[f"{record.get('agent') or 'unknown'}@{record.get('model') or 'unspecified'}"].append(record)
     mixed_tasks = {
         task: sorted({str(record.get("comparison_key") or f"{task}@unversioned") for record in task_records})
         for task, task_records in by_task.items()
@@ -67,6 +77,7 @@ def build_report(inputs: Sequence[Path]) -> dict[str, Any]:
         "summary": _summary(records),
         "tasks": {task: _summary(task_records) for task, task_records in sorted(by_task.items())},
         "configurations": {key: _summary(config_records) for key, config_records in sorted(by_configuration.items())},
+        "agents": {key: _summary(agent_records) for key, agent_records in sorted(by_agent.items())},
         "warnings": {"mixed_task_configurations": mixed_tasks},
     }
 
