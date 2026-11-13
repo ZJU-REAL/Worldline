@@ -1,12 +1,15 @@
-"""Host capability checks for Worldline and Harbor sandboxes."""
+"""Independent core, native dependency and Harbor container health checks."""
 
 from __future__ import annotations
 
+import importlib.util
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+
+from worldline.adapters.efe import checkout_info
 
 
 def _version(command: list[str]) -> str | None:
@@ -18,53 +21,65 @@ def _version(command: list[str]) -> str | None:
     return text[0] if text else None
 
 
-def doctor(root: Path = Path.cwd()) -> dict[str, Any]:
-    harbor = shutil.which("harbor")
-    docker = shutil.which("docker")
-    podman = shutil.which("podman")
-    uv = shutil.which("uv")
-    nvidia_smi = shutil.which("nvidia-smi")
+def _probe(command: list[str]) -> dict:
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=10, check=False)
+        return {"ok": result.returncode == 0, "detail": (result.stdout or result.stderr).strip()[:1000]}
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return {"ok": False, "detail": str(error)}
+
+
+def doctor(root: Path | None = None) -> dict[str, Any]:
+    root = (root or Path.cwd()).resolve()
+    harbor, docker, podman, uv, nvidia = (
+        shutil.which(name) for name in ("harbor", "docker", "podman", "uv", "nvidia-smi")
+    )
+    engine = docker or podman
+    container = _probe([engine, "info"]) if engine else {"ok": False, "detail": "no container engine installed"}
+    compose = _probe([engine, "compose", "version"]) if engine else {"ok": False, "detail": "no compose installed"}
+    try:
+        efe = {"ok": True, **checkout_info(start=root)}
+    except ValueError as error:
+        efe = {"ok": False, "detail": str(error)}
     checks = {
-        "python": {"ok": sys.version_info >= (3, 12), "version": sys.version.split()[0]},
+        "python": {"ok": (3, 12) <= sys.version_info[:2] < (3, 15), "version": sys.version.split()[0]},
         "uv": {"ok": uv is not None, "path": uv, "version": _version([uv, "--version"]) if uv else None},
         "harbor": {
             "ok": harbor is not None,
             "path": harbor,
             "version": _version([harbor, "--version"]) if harbor else None,
         },
-        "container": {
-            "ok": docker is not None or podman is not None,
-            "docker": docker,
-            "podman": podman,
-            "version": _version([docker, "--version"])
-            if docker
-            else _version([podman, "--version"])
-            if podman
-            else None,
-        },
-        "nvidia": {
-            "ok": nvidia_smi is not None,
-            "path": nvidia_smi,
-            "version": _version([nvidia_smi, "--query-gpu=driver_version", "--format=csv,noheader"])
-            if nvidia_smi
-            else None,
-        },
-        "repository": {
-            "ok": (root / "tasks").is_dir() and (root / "worldline").is_dir(),
-            "root": str(root.resolve()),
-        },
+        "container": {**container, "docker": docker, "podman": podman},
+        "compose": compose,
+        "nvidia": {"ok": nvidia is not None, "path": nvidia},
+        "repository": {"ok": (root / "worldline").is_dir(), "root": str(root)},
+        "efe": efe,
     }
-    recommendations: list[str] = []
+    rua_missing = [name for name in ("mujoco", "numpy", "PIL") if importlib.util.find_spec(name) is None]
+    cua = {"dependencies_ready": False}
+    try:
+        from importlib.metadata import version
+        from worldline.adapters.browsergym import BrowserGymEnvironment
+
+        version("browsergym-core")
+        BrowserGymEnvironment.preflight()
+        cua = {"dependencies_ready": True}
+    except Exception as error:
+        cua["detail"] = str(error)
+    recommendations = []
     if not checks["harbor"]["ok"]:
-        recommendations.append("Install the project with dependencies so the `harbor` executable is available.")
-    if not checks["container"]["ok"]:
-        recommendations.append("Install Docker Compose v2 or rootless Podman before running EFE sandboxes.")
-    if not checks["nvidia"]["ok"]:
-        recommendations.append("GPU tasks require an NVIDIA driver and the matching container runtime integration.")
+        recommendations.append("Harbor tasks: install worldline-agent[harbor] in the runner environment.")
+    if not container["ok"] or not compose["ok"]:
+        recommendations.append("Harbor tasks: make Docker/Podman daemon and Compose accessible to this user.")
+    if not nvidia:
+        recommendations.append("GPU tasks: install NVIDIA drivers and the container runtime integration.")
     return {
-        "schema_version": "worldline.doctor/0.1",
-        "framework_ready": checks["python"]["ok"] and checks["uv"]["ok"] and checks["repository"]["ok"],
-        "evaluation_ready": checks["harbor"]["ok"] and checks["container"]["ok"],
+        "schema_version": "worldline.doctor/0.2",
+        # Installed wheels work anywhere, including without a checkout, uv or EFE.
+        "framework_ready": checks["python"]["ok"],
+        "evaluation_ready": checks["python"]["ok"] and checks["harbor"]["ok"] and container["ok"] and compose["ok"],
+        "native": {"rua": {"dependencies_ready": not rua_missing, "missing": rua_missing}, "cua": cua},
         "checks": checks,
         "recommendations": recommendations,
+        "scope": "Dependency/container preflight only; native readiness requires an actual task rollout.",
     }

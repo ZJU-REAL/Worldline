@@ -1,6 +1,6 @@
 [project]
 name = "worldline-agent"
-version = "0.2.0"
+version = "0.3.0"
 description = "Unified evaluation, distillation, and training for sandboxed agents"
 readme = "README.md"
 license = "MIT"
@@ -21,7 +21,6 @@ Repository = "https://github.com/ZJU-REAL/Worldline"
 Upstream = "https://github.com/mll-lab-nu/embodied-first-exam"
 
 [project.scripts]
-efe = "efe:main"
 worldline = "worldline.cli:main"
 
 [build-system]
@@ -31,13 +30,8 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["worldline"]
 
-[tool.hatch.build.targets.wheel.force-include]
-"scripts/efe.py" = "efe.py"
-"scripts/efe_harbor_hook.py" = "efe_harbor_hook.py"
-"scripts/efe-harbor.pth" = "efe-harbor.pth"
-
 [tool.hatch.build.targets.sdist]
-only-include = ["scripts/efe.py", "scripts/efe_harbor_hook.py", "scripts/efe-harbor.pth", "worldline", "examples", "docs/worldline", "LICENSE", "README.md"]
+only-include = ["worldline", "examples", "tests", "docs/worldline", "LICENSE", "README.md", "CONTRIBUTING.md"]
 
 [tool.ruff]
 line-length = 120

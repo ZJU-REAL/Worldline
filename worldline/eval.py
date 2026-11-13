@@ -42,13 +42,15 @@ def harbor_command(
     return tuple(command)
 
 
-def _ingest_completed_trials(backend_jobs_dir: Path, run_dir: Path, trace: TraceWriter, run_id: str) -> int:
+def _ingest_completed_trials(
+    backend_jobs_dir: Path, run_dir: Path, trace: TraceWriter, run_id: str, *, task_snapshot: dict | None = None
+) -> int:
     normalized = []
     for result_path in sorted(backend_jobs_dir.rglob("result.json")):
         trial_dir = result_path.parent
         if not (trial_dir / "verifier").is_dir():
             continue
-        result = normalize_harbor_trial(trial_dir)
+        result = normalize_harbor_trial(trial_dir, task_snapshot=task_snapshot)
         normalized.append(asdict(result))
         trace.append(
             TraceEvent(
@@ -79,11 +81,17 @@ def evaluate_harbor(
     extra_args: Sequence[str] = (),
     dry_run: bool = False,
     env: Mapping[str, str] | None = None,
+    task_metadata: Mapping | None = None,
 ) -> tuple[RunRecord, Path]:
     """Run one Harbor task and preserve a backend-neutral Worldline record."""
 
     task_dir = task_dir.resolve()
     task = load_task(task_dir)
+    if task_metadata:
+        split = task_metadata.get("split", task.split)
+        if task.split != "unspecified" and split != task.split:
+            raise ValueError("catalog cannot override a task's declared split")
+        task = replace(task, split=split, metadata={**task.metadata, **task_metadata, "split": split})
     run_id = make_run_id(task.id)
     run_dir = runs_dir.resolve() / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
@@ -107,13 +115,15 @@ def evaluate_harbor(
         model=model,
         command=command,
         status="planned" if dry_run else "created",
-        metadata={"task_dir": str(task_dir), "seed": task.seed, "split": task.split},
+        metadata={**task.metadata, "task_dir": str(task_dir), "seed": task.seed, "split": task.split},
     )
     write_record(run_dir, record)
+    write_json(run_dir / "task.json", asdict(task))
     trace.append(TraceEvent(run_id=run_id, kind="run.created", payload={"command": command}))
 
     if dry_run:
         trace.append(TraceEvent(run_id=run_id, kind="run.planned", payload={"backend": "harbor"}))
+        trace.close()
         return record, run_dir
 
     if shutil.which(executable) is None:
@@ -126,6 +136,7 @@ def evaluate_harbor(
                 payload={"error": f"executable not found: {executable}"},
             )
         )
+        trace.close()
         raise BackendUnavailableError(f"Harbor executable not found: {executable}")
 
     started_at = time.time_ns()
@@ -137,11 +148,17 @@ def evaluate_harbor(
     if env:
         process_env.update(env)
     log_path = run_dir / "backend.log"
-    with log_path.open("wb") as log:
-        completed = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, env=process_env, check=False)
-
+    try:
+        with log_path.open("wb") as log:
+            completed = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, env=process_env, check=False)
+        ingested = _ingest_completed_trials(backend_jobs_dir, run_dir, trace, run_id, task_snapshot=asdict(task))
+    except BaseException as error:
+        failed = replace(running, status="infra_error", finished_at_ns=time.time_ns(), exit_code=2)
+        write_record(run_dir, failed)
+        trace.append(TraceEvent(run_id, "run.infra_error", {"error": f"{type(error).__name__}: {error}"}))
+        trace.close()
+        raise
     finished_at = time.time_ns()
-    ingested = _ingest_completed_trials(backend_jobs_dir, run_dir, trace, run_id)
     status = "completed" if completed.returncode == 0 else "failed"
     result = replace(
         running,
@@ -163,4 +180,5 @@ def evaluate_harbor(
             },
         )
     )
+    trace.close()
     return result, run_dir

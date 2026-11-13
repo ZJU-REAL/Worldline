@@ -1,3 +1,3 @@
-[submodule "third_party/RoboTwin"]
-	path = third_party/RoboTwin
-	url = https://github.com/RoboTwin-Platform/RoboTwin.git
+[submodule "embodied-first-exam"]
+	path = third_party/embodied-first-exam
+	url = https://github.com/mll-lab-nu/embodied-first-exam.git

@@ -5,165 +5,18 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
-import base64
-import io
 from pathlib import Path
 
 from worldline.datasets import _jsonl, _record_split, validate_datasets
 from worldline.media import MediaStore
 from worldline.run import write_json
+from worldline.storage import staged_directory, file_sha256
+from worldline.learning.formats.messages import normalized_messages
+from worldline.learning.formats.llama_factory import llama_factory_record
+from worldline.learning.formats.verl import ParquetStream
 
 
-def _content(content, media, images):
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        raise ValueError("message content must be text or multimodal parts")
-    parts = []
-    for part in content:
-        if part.get("type") == "text":
-            parts.append(part["text"])
-        elif part.get("type") == "image_url":
-            url = part["image_url"]["url"]
-            if not isinstance(url, str) or not url.startswith("data:image/") or ";base64," not in url:
-                raise ValueError("image handoff requires embedded verified image bytes")
-            prefix, encoded = url.split(";base64,", 1)
-            from PIL import Image
-
-            try:
-                Image.open(io.BytesIO(base64.b64decode(encoded, validate=True))).verify()
-            except Exception as error:
-                raise ValueError("invalid training image bytes") from error
-            reference = media.put(encoded, prefix[5:], "data_url")["__worldline_media__"]
-            images.append(reference["path"])
-            parts.append("<image>")
-        else:
-            raise ValueError("unsupported multimodal content type")
-    return "\n".join(parts)
-
-
-def normalized_messages(row, media):
-    images, messages = [], []
-    pending_calls = set()
-    for raw in row["messages"]:
-        message = dict(raw)
-        role = message.get("role")
-        if role not in {"system", "user", "assistant", "tool"}:
-            raise ValueError("unsupported message role")
-        message["content"] = _content(message.get("content"), media, images)
-        calls = []
-        for call in message.get("tool_calls") or []:
-            if "function" in call:
-                call = dict(call)
-            else:
-                call = {
-                    "id": call.get("tool_call_id"),
-                    "type": "function",
-                    "function": {"name": call["function_name"], "arguments": json.dumps(call.get("arguments", {}))},
-                }
-            if (
-                role != "assistant"
-                or not isinstance(call.get("id"), str)
-                or not call["id"]
-                or call["id"] in pending_calls
-            ):
-                raise ValueError("missing or duplicate tool call id")
-            arguments = call["function"]["arguments"]
-            if isinstance(arguments, str):
-                json.loads(arguments)
-            else:
-                call["function"] = {**call["function"], "arguments": json.dumps(arguments)}
-            pending_calls.add(call["id"])
-            calls.append(call)
-        if calls:
-            message["tool_calls"] = calls
-        if role == "tool":
-            ident = message.get("tool_call_id")
-            if ident not in pending_calls:
-                raise ValueError("tool response has no matching pending call")
-            pending_calls.remove(ident)
-        messages.append(message)
-    if pending_calls:
-        raise ValueError("trajectory ends with unanswered tool calls")
-    if not messages or not any(message["role"] == "assistant" for message in messages):
-        raise ValueError("SFT trajectory must contain assistant supervision")
-    return messages, images
-
-
-def llama_factory_record(row, media):
-    messages, images = normalized_messages(row, media)
-    conversations, system, dropped_thoughts = [], [], 0
-    for message in messages:
-        role, content = message["role"], message["content"]
-        if role == "system":
-            if conversations:
-                raise ValueError("mid-episode system messages require a custom trainer")
-            system.append(content)
-            continue
-        if message.get("tool_calls"):
-            dropped_thoughts += int(bool(content))
-            content = json.dumps(
-                [
-                    {"name": call["function"]["name"], "arguments": json.loads(call["function"]["arguments"])}
-                    for call in message["tool_calls"]
-                ],
-                ensure_ascii=False,
-            )
-            tag = "function_call"
-        else:
-            tag = {"user": "human", "assistant": "gpt", "tool": "observation"}[role]
-        if conversations and tag in {"human", "observation"} and conversations[-1]["from"] in {"human", "observation"}:
-            conversations[-1]["value"] += "\n" + content
-        else:
-            conversations.append({"from": tag, "value": content})
-    trailing = 0
-    while conversations and conversations[-1]["from"] in {"human", "observation"}:
-        conversations.pop()
-        trailing += 1
-    images = images[: sum(message["value"].count("<image>") for message in conversations)]
-    for index, message in enumerate(conversations):
-        valid = {"human", "observation"} if index % 2 == 0 else {"gpt", "function_call"}
-        if message["from"] not in valid:
-            raise ValueError("LLaMA-Factory requires alternating input/output roles")
-    if len(conversations) % 2:
-        raise ValueError("incomplete LLaMA-Factory SFT conversation")
-    return {
-        "id": row["id"],
-        "conversations": conversations,
-        "system": "\n".join(system),
-        "tools": json.dumps(row.get("tools") or [], ensure_ascii=False),
-        "images": images,
-        "worldline_metadata": {**row.get("metadata", {}), "trailing_inputs_omitted": trailing},
-    }, dropped_thoughts
-
-
-class ParquetStream:
-    def __init__(self, path, schema, batch_size=128):
-        import pyarrow.parquet as pq
-
-        self.path, self.schema, self.batch_size, self.rows = path, schema, batch_size, []
-        self.writer = pq.ParquetWriter(path, schema)
-
-    def append(self, row):
-        self.rows.append(row)
-        if len(self.rows) >= self.batch_size:
-            self.flush()
-
-    def flush(self):
-        import pyarrow as pa
-
-        if self.rows:
-            self.writer.write_table(pa.Table.from_pylist(self.rows, schema=self.schema))
-            self.rows.clear()
-
-    def close(self):
-        self.flush()
-        self.writer.close()
-
-
-def export_handoff(
+def _export_handoff(
     train_file: Path,
     output_dir: Path,
     *,
@@ -339,12 +192,15 @@ def export_handoff(
         "rejected": rejected,
         "function_only_prose_omissions": thoughts,
         "media_files": media.files_written,
-        "inputs": [{"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()} for path in inputs],
+        "inputs": [{"path": str(path), "sha256": file_sha256(path)} for path in inputs],
         "files": {
-            str(path.relative_to(output_dir)): hashlib.sha256(path.read_bytes()).hexdigest()
-            for path in output_dir.rglob("*")
-            if path.is_file()
+            str(path.relative_to(output_dir)): file_sha256(path) for path in output_dir.rglob("*") if path.is_file()
         },
     }
     write_json(output_dir / "manifest.json", manifest)
     return manifest
+
+
+def export_handoff(train_file: Path, output_dir: Path, **options):
+    with staged_directory(output_dir) as stage:
+        return _export_handoff(train_file, stage, **options)

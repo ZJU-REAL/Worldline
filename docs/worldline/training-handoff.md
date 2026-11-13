@@ -53,6 +53,8 @@ worldline training-handoff datasets/my-experiment/splits/sft/train.jsonl \
 
 格式接口按官方数据协议核对；本轮有 JSONL/角色/图片/Parquet 检查。完整训练仍取决于实际安装版本、模型 chat template、processor、资源和训练目标。
 
-原生 0.2 轨迹的图像可校验并完整恢复。历史 Harbor/ATIF 转换目前保留文本与图像引用信息，
-不会自动从所有 gateway/附件格式恢复图片；这些轨迹在进行 VLM 训练前，需要核对并补齐实际图像资产。
-文本引用存在并不代表已经得到可用的多模态训练样本。
+原生多模态轨迹可按 hash 完整恢复。0.3 还支持 ATIF-v1.6+ 的 `source.media_type/path` 本地图片，在 trial 的可信目录内定位并转为真实视觉内容；不会联网补图。缺失、越界、远程或歧义图片引用，以及未支持的 audio/copy-context loss-mask 轨迹会拒收，原始评测证据保留。非标准 gateway 附件仍需先按任务声明归档。
+
+数据切分写回每条样本的 split，训练交付拒收 test/evaluation/held_out/validation。catalog 的 split/group 和每个 Harbor trial 的任务元数据传播到导出；没有声明 split 的历史数据仍需人工审核准入。
+
+完整交付包在成功校验后从同级 staging 目录原子发布，不覆盖非空输出；失败目录单独保留为 `.failed-*`，错误报告其位置。训练输入及 Parquet 哈希使用流式读取，内存不会因一次整体读入数据文件而增长。转换仍需要容纳单个 episode，以及一个 Parquet batch 的图像；长视觉轨迹尚未实现逐 turn 的完全流式处理。

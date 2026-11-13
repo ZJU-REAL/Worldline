@@ -8,6 +8,7 @@ from typing import Any
 
 from worldline.adapters.harbor import load_task
 from worldline.run import write_json
+from worldline.storage import file_sha256
 
 
 def build_catalog(
@@ -104,3 +105,23 @@ def catalog_task_paths(catalog_path: Path) -> list[Path]:
             raise ValueError(f"catalog identity changed: {task['id']}")
         paths.append(path)
     return paths
+
+
+def catalog_task_metadata(catalog_path: Path) -> dict[Path, dict]:
+    paths = catalog_task_paths(catalog_path)
+    data = json.loads(catalog_path.read_text(encoding="utf-8"))
+    revision = file_sha256(catalog_path)
+    metadata = {}
+    for path, entry in zip(paths, data["tasks"], strict=True):
+        loaded = load_task(path)
+        if entry.get("seed", loaded.seed) != loaded.seed:
+            raise ValueError("catalog seed differs from the underlying task")
+        split = entry.get("split", "unspecified")
+        if loaded.split != "unspecified" and split != loaded.split:
+            raise ValueError("catalog cannot override a task's declared split")
+        metadata[path] = {
+            "split": split,
+            "split_group": entry.get("split_group", loaded.id),
+            "catalog_sha256": revision,
+        }
+    return metadata

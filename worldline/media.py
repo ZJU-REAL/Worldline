@@ -6,6 +6,7 @@ import base64
 import hashlib
 from pathlib import Path
 from typing import Any
+from worldline.storage import publish_bytes
 
 MARKER = "__worldline_media__"
 EXTENSIONS = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
@@ -23,15 +24,11 @@ class MediaStore:
         relative = Path("media") / (digest + EXTENSIONS.get(mime_type, ".bin"))
         path = self.root / relative
         if not path.exists():
-            path.parent.mkdir(parents=True, exist_ok=True)
-            # Exclusive creation tolerates duplicate blobs across concurrent callers.
-            try:
-                with path.open("xb") as stream:
-                    stream.write(raw)
+            if publish_bytes(path, raw, exclusive=True):
                 self.files_written += 1
                 self.bytes_written += len(raw)
-            except FileExistsError:
-                pass
+        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise ValueError("existing media artifact hash mismatch")
         return {MARKER: {"path": str(relative), "sha256": digest, "mime_type": mime_type, "encoding": encoding}}
 
     def externalize(self, value: Any) -> Any:

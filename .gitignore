@@ -30,9 +30,3 @@ Thumbs.db
 *.orig
 *.rej
 *.tmp
-# build contexts that scripts stage (images/<name>/BUILD_CONTEXT); images/ese/context/ is the committed snapshot
-/images/*/context/
-!/images/ese/context/
-images/mujoco/rcb_mj/
-# generated (scripts/dataset_manifest.py write)
-/tasks/dataset.toml

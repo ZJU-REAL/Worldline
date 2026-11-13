@@ -15,6 +15,7 @@ from typing import Any, Iterable, Iterator, Literal, Mapping, Sequence
 
 from worldline.run import write_json
 from worldline.media import hydrate_media
+from worldline.adapters.atif import atif_messages
 
 ExportFormat = Literal["sft", "preference", "rl"]
 
@@ -55,56 +56,6 @@ def discover_results(inputs: Sequence[Path]) -> list[Path]:
         elif path.is_dir():
             found.update(path.rglob("result.normalized.json"))
     return sorted(found)
-
-
-def _content(value: Any) -> str:
-    if isinstance(value, str):
-        return value
-    if not isinstance(value, list):
-        return json.dumps(value, ensure_ascii=False) if value is not None else ""
-    parts: list[str] = []
-    for part in value:
-        if isinstance(part, str):
-            parts.append(part)
-        elif isinstance(part, dict):
-            if isinstance(part.get("text"), str):
-                parts.append(part["text"])
-            elif part.get("type") in {"image", "audio"}:
-                parts.append(f"[{part['type']}: {part.get('path') or part.get('url') or 'embedded'}]")
-            else:
-                parts.append(json.dumps(part, ensure_ascii=False))
-    return "\n".join(part for part in parts if part)
-
-
-def atif_messages(trajectory: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
-    """Convert ATIF steps to a chat/tool sequence without dropping tool observations."""
-
-    messages: list[Mapping[str, Any]] = []
-    role_map = {"agent": "assistant", "user": "user", "system": "system", "environment": "tool"}
-    for step in trajectory.get("steps") or []:
-        if not isinstance(step, dict):
-            continue
-        role = role_map.get(str(step.get("source")), str(step.get("source") or "user"))
-        message: dict[str, Any] = {"role": role, "content": _content(step.get("message"))}
-        tool_calls = step.get("tool_calls")
-        if isinstance(tool_calls, list) and tool_calls:
-            message["tool_calls"] = tool_calls
-        if message["content"] or message.get("tool_calls"):
-            messages.append(message)
-
-        observation = step.get("observation")
-        if not isinstance(observation, dict):
-            continue
-        for result in observation.get("results") or []:
-            if not isinstance(result, dict):
-                continue
-            tool_message: dict[str, Any] = {"role": "tool", "content": _content(result.get("content"))}
-            source_call_id = result.get("source_call_id")
-            if source_call_id:
-                tool_message["tool_call_id"] = source_call_id
-            if tool_message["content"] or source_call_id:
-                messages.append(tool_message)
-    return tuple(messages)
 
 
 def _trajectory_path(result: Mapping[str, Any]) -> Path | None:
@@ -155,7 +106,11 @@ def iter_episodes(inputs: Sequence[Path], stats: dict[str, int]) -> Iterator[Epi
             continue
         task = _load_object(result_path.parent / "task.json")
         run = _load_object(result_path.parent / "run.json")
-        metadata = {**(run.get("metadata") or {}), **(task.get("metadata") or {})}
+        metadata = {
+            **(run.get("metadata") or {}),
+            **(task.get("metadata") or {}),
+            **(result.get("task_metadata") or {}),
+        }
         declared_split = task.get("split", metadata.get("split", "unspecified"))
         if declared_split in {"test", "evaluation", "held_out"}:
             stats["held_out"] += 1
@@ -169,7 +124,9 @@ def iter_episodes(inputs: Sequence[Path], stats: dict[str, int]) -> Iterator[Epi
             if trajectory.get("schema_version") in {"worldline.messages/0.1", "worldline.messages/0.2"}:
                 messages = tuple(hydrate_media(trajectory.get("messages") or [], Path(result["source"])))
             else:
-                messages = atif_messages(trajectory)
+                messages = atif_messages(
+                    trajectory, artifact_root=Path(result["source"]), trajectory_path=trajectory_path
+                )
             if any(
                 not isinstance(message, dict) or message.get("role") not in {"system", "user", "assistant", "tool"}
                 for message in messages
@@ -200,7 +157,7 @@ def iter_episodes(inputs: Sequence[Path], stats: dict[str, int]) -> Iterator[Epi
             comparison_key=str(result.get("comparison_key") or ""),
             split=declared_split,
             split_group=str(metadata.get("split_group") or result.get("task_id") or "unknown"),
-            seed=task.get("seed", metadata.get("seed", 0)),
+            seed=metadata.get("seed", task.get("seed", 0)),
             tools=tuple(trajectory.get("tools") or []),
         )
 
@@ -401,7 +358,9 @@ def _jsonl(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
         for line_number, line in enumerate(stream, start=1):
             if not line.strip():
                 continue
-            value = json.loads(line)
+            value = json.loads(
+                line, parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f"non-finite JSON: {value}"))
+            )
             if not isinstance(value, dict):
                 raise ValueError(f"{path}:{line_number}: record must be a JSON object")
             yield line_number, value
@@ -434,6 +393,10 @@ def split_dataset(
             if group in declarations and declarations[group] != declared:
                 raise ValueError(f"conflicting declared splits for group {group!r}")
             declarations[group] = declared
+        elif declared in {"evaluation", "held_out"}:
+            if group in declarations and declarations[group] != "test":
+                raise ValueError(f"conflicting declared splits for group {group!r}")
+            declarations[group] = "test"
     output_dir.mkdir(parents=True, exist_ok=True)
     streams = {name: (output_dir / f"{name}.jsonl").open("w", encoding="utf-8") for name in names}
     try:
@@ -449,6 +412,10 @@ def split_dataset(
             )
             split = declarations.get(group, split)
             tasks[task_id] = split
+            original = _record_split(record)
+            record["split"] = split
+            if isinstance(record.get("metadata"), dict):
+                record["metadata"] = {**record["metadata"], "split": split, "source_split": original}
             streams[split].write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
             counts[split] += 1
     finally:

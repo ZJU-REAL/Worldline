@@ -4,9 +4,10 @@ Worldline 面向需要有状态环境的 Agent：任务和环境只接入一次�
 
 - [架构与模块分工](architecture.md)：依赖方向、插件接入与协作边界。
 - [RUA 使用与集成](rua.md)：真实 MuJoCo 示例、模型接入、RUA/EFE 任务包与训练闭环。
-- [RUA 论文调研](research/rua-related-work.md)：截至 2026-11-13 的一手资料核对及研究方向。
+- [上游与版本](upstreams.md)：EFE 的可选 submodule、外部 checkout 与更新边界。
+- [0.3 工程迭代](iteration-03.md)：目录隔离、数据可靠性、批次控制与验收。
 - [基础设施复审](infra-review.md)：缺陷、修复、效率证据与剩余限制。
 - [训练数据交付](training-handoff.md)：LLaMA-Factory 与 verl 的数据包和接入边界。
 - [CUA / BrowserGym](cua.md)：真实浏览器环境与 benchmark 接入。
 
-EFE 原有任务、镜像、服务和正式评测协议仍在其原目录中；平台的原生任务使用 `worldline.toml`，已有 Harbor 任务继续使用 `task.toml`。
+EFE 原有任务、镜像、服务和正式协议位于可选 `third_party/embodied-first-exam/` checkout 内；平台的原生任务使用 `worldline.toml`，已有 Harbor 任务继续使用 `task.toml`。

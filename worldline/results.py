@@ -55,6 +55,7 @@ class NormalizedResult:
     logical_trial_id: str | None = None
     attempt: int = 1
     superseded_by: str | None = None
+    task_metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 def _load_object(path: Path) -> dict[str, Any]:
@@ -105,7 +106,7 @@ def _artifacts(trial_dir: Path) -> tuple[ArtifactRef, ...]:
     return tuple(sorted(found, key=lambda artifact: (artifact.kind, artifact.path)))
 
 
-def normalize_harbor_trial(trial_dir: Path) -> NormalizedResult:
+def normalize_harbor_trial(trial_dir: Path, *, task_snapshot: Mapping[str, Any] | None = None) -> NormalizedResult:
     """Read a Harbor trial without mutating or copying its potentially large artifacts."""
 
     trial_dir = trial_dir.resolve()
@@ -163,6 +164,27 @@ def normalize_harbor_trial(trial_dir: Path) -> NormalizedResult:
     task_version = locked_task.get("digest") or result.get("task_checksum")
     agent_info = result.get("agent_info") if isinstance(result.get("agent_info"), dict) else {}
     model_info = agent_info.get("model_info") if isinstance(agent_info.get("model_info"), dict) else {}
+    task_metadata = {}
+    if task_snapshot:
+        aliases = {task_snapshot["id"], task_snapshot["id"].rsplit("/", 1)[-1]}
+        if task_snapshot.get("environment"):
+            aliases.add(Path(task_snapshot["environment"]).name)
+        if task_id and task_id not in aliases:
+            raise ValueError("Harbor result task identity differs from the evaluation task snapshot")
+        snapshot_version = task_snapshot["version"]
+        if (
+            task_version
+            and snapshot_version != "unversioned"
+            and str(task_version).removeprefix("sha256:") != str(snapshot_version).removeprefix("sha256:")
+        ):
+            raise ValueError("Harbor result version differs from the evaluation task snapshot")
+        task_id = task_snapshot["id"]
+        task_version = task_snapshot["version"]
+        task_metadata = {
+            **task_snapshot.get("metadata", {}),
+            "seed": task_snapshot["seed"],
+            "split": task_snapshot["split"],
+        }
     return NormalizedResult(
         schema_version="worldline.result/0.1",
         backend="harbor",
@@ -179,16 +201,27 @@ def normalize_harbor_trial(trial_dir: Path) -> NormalizedResult:
         comparison_key=f"{task_id or 'unknown'}@{task_version or 'unversioned'}",
         agent=str(agent_info["name"]) if agent_info.get("name") else None,
         model=str(model_info["name"]) if model_info.get("name") else None,
+        task_metadata=task_metadata,
     )
 
 
-def ingest_harbor_trial(trial_dir: Path, runs_dir: Path = Path("runs")) -> tuple[NormalizedResult, Path]:
-    result = normalize_harbor_trial(trial_dir)
+def ingest_harbor_trial(
+    trial_dir: Path, runs_dir: Path = Path("runs"), *, task_dir: Path | None = None
+) -> tuple[NormalizedResult, Path]:
+    snapshot = None
+    if task_dir is not None:
+        from worldline.adapters.harbor import load_task
+
+        snapshot = asdict(load_task(task_dir))
+    result = normalize_harbor_trial(trial_dir, task_snapshot=snapshot)
     run_id = f"import-{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}-{uuid.uuid4().hex[:8]}"
     run_dir = runs_dir.resolve() / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
     write_json(run_dir / "result.normalized.json", asdict(result))
-    TraceWriter(run_dir / "trace.jsonl").append(
+    if snapshot is not None:
+        write_json(run_dir / "task.json", snapshot)
+    trace = TraceWriter(run_dir / "trace.jsonl")
+    trace.append(
         TraceEvent(
             run_id=run_id,
             kind="result.ingested",
@@ -200,4 +233,5 @@ def ingest_harbor_trial(trial_dir: Path, runs_dir: Path = Path("runs")) -> tuple
             },
         )
     )
+    trace.close()
     return result, run_dir

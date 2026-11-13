@@ -1,195 +1,140 @@
 # Worldline
 
-Worldline 是一个面向 RUA（Robot-Use Agent）和 CUA（Computer-Use Agent）的开源训、蒸、评一体化框架。开发者只需接入一次任务环境和验证器，就可以在同一套沙盒与任务定义上完成 Agent 评测、并行 rollout、教师轨迹采集、数据蒸馏、模型训练和训练后复评。
+Worldline 为需要有状态环境的 Agent 提供评测、教师 rollout、轨迹蒸馏和训练数据交付。RUA 是首个 Domain；CUA 已接入真实 BrowserGym 浏览器。环境、Agent Harness、可信验证器和外部训练器通过独立接口协作。
 
-项目初期以 RUA 为主要场景，先打通机器人虚拟环境中的完整闭环，再逐步扩展到桌面、浏览器和移动端等 CUA 环境。
+目前是**单机研发框架**。真实 MuJoCo 和浏览器示例用于验证基础设施；正式大型机器人 benchmark、桌面 VM、分布式调度及在线 RL 环境桥仍需接入和验收。
 
-项目以 [Embodied First Exam](https://github.com/mll-lab-nu/embodied-first-exam) 的任务、沙盒和可信评测协议为基础，并保留其 Harbor 兼容能力。Worldline 在此之上增加通用运行时、统一轨迹、数据蒸馏和训练闭环；上游任务仍保持原有结构，便于持续同步和复用。
+0.3 版将 EFE 从根目录快照改为可选、固定版本的 Git submodule，补齐 Harbor 多 trial 与 catalog 的数据划分传播、ATIF 本地图片恢复、批次查询/停止领取/恢复检查，以及结果、媒体和完整数据包的原子发布。实现与边界见 [本轮复审](docs/worldline/iteration-03.md)。
 
-## 核心目标
+## 目录和依赖
 
-0.2 版增加了持久化批次与恢复、受控模型/基础设施重试、CPU/GPU admission、流式蒸馏、图像去重、
-LLaMA-Factory/verl 数据交付和真实 BrowserGym CUA 接入。修复依据、测试与未完成事项见
-[基础设施复审](docs/worldline/infra-review.md)。当前定位为单机研发基础设施，正式大规模 benchmark、
-在线 RL 环境桥和桌面 VM CUA 仍需独立接入与实测。
-
-```bash
-# 中断后使用相同任务与 Agent 配置恢复；完成的 trial 不再次执行
-worldline rollout examples/rua/reach-train -a reference --batch-id rua-v1
-worldline rollout examples/rua/reach-train -a reference --batch-id rua-v1 --resume
-
-# 将已划分数据交给独立训练框架
-worldline training-handoff datasets/rua-v1/splits/sft/train.jsonl \
-  --framework llama-factory --output-dir datasets/lf-package
-worldline training-handoff datasets/rua-v1/splits/sft/train.jsonl \
-  --framework verl --output-dir datasets/verl-package
+```text
+worldline/
+  contracts.py, tasks.py, plugins.py     # 通用契约、任务、插件发现
+  runtime/                              # 环境进程、session、批次、资源与队列控制
+  agents/                               # 模型调用、工具 Harness
+  domains/rua/, domains/cua/             # 领域实现与动作语义
+  adapters/                             # EFE/Harbor、RUA socket、BrowserGym、ATIF
+  learning/formats/                     # 公共消息校验、LLaMA-Factory、verl 格式
+  learning/                             # 交付编排、独立训练作业
+  datasets.py, distill.py                # 数据准入、配对、切分、蒸馏
+  trace.py, results.py, report.py        # 轨迹、可信结果、成本和比较
+  storage.py, media.py                   # 原子存储、图片去重与校验
+examples/rua/, examples/cua/             # 小型可运行任务
+tests/                                 # 平台与集成回归测试
+docs/worldline/                         # 框架文档
+third_party/embodied-first-exam/         # 可选上游 submodule，保留其内部完整布局
 ```
 
-浏览器安装与实际运行见 [CUA 指南](docs/worldline/cua.md)，训练格式与模型/processor 选择见
-[训练交付指南](docs/worldline/training-handoff.md)。
+[Embodied First Exam](https://github.com/mll-lab-nu/embodied-first-exam) 是独立上游项目，由适配器接入。它的任务、镜像、脚本、Python 服务和协议都留在自己的 checkout 内。Worldline 的核心 wheel 不包含 EFE、Harbor import hook、模拟器或训练库；安装和数据处理不要求初始化 submodule。详见 [上游接入与版本](docs/worldline/upstreams.md) 和 [模块分工](docs/worldline/architecture.md)。
 
-- 一次接入，同时支持评测、数据生成、蒸馏和训练。
-- 隔离 Agent、环境和验证器，保证奖励可信、实验可复现。
-- 统一任务生命周期和轨迹格式，不强行统一不同领域的动作空间。
-- 兼容 Harbor、Embodied First Exam、Robo Use 等现有任务和环境。
-- 对接 verl 等训练后端，不重复实现底层训练算法。
+## 安装和快速验证
 
-## 核心架构
-
-Worldline 围绕一条完整链路设计：任务定义运行边界，沙盒承载真实交互，轨迹保存过程，验证器给出可信结果，训练管线再把这些结果转化为模型能力。
-
-**Task Package** 定义一项可复现的任务，包括任务指令、运行环境、初始状态、Agent 权限、资源预算、提交产物、验证方式、数据划分和版本。它是评测与训练共用的任务入口。
-
-**Sandbox Runtime** 承载 Agent 与环境之间的有状态交互，统一环境的创建、重置、调用和销毁，并适配 Docker、本地进程、远程实例及不同的 RUA/CUA 环境。后续将在这一层支持状态快照、恢复和分支探索。
-
-**Agent Runtime** 负责启动 Agent、传递任务和环境反馈，并记录模型调用与工具使用。框架支持 Codex、Claude Code、OpenAI-compatible 模型和自定义 Agent，同时尽量保留各自原生的工作方式。
-
-**Verifier** 与 Agent 隔离运行，根据提交产物和环境保存的可信状态进行评分，统一输出最终奖励、过程指标、安全约束和基础设施错误。
-
-**Trace Store** 保存每次运行中的对话、观察、动作、工具调用、代码产物、奖励、成本和版本信息。轨迹可以被检索、筛选、切片、配对和重放，也可以转换为 SFT、偏好学习或 RL 数据。
-
-**Learning Pipeline** 根据验证结果清洗和转换轨迹，再调用 verl 等训练后端完成 SFT、DPO 或在线 RL。训练后的模型回到同一套任务、沙盒和验证器中复评，形成完整闭环。
-
-## 基本工作流
-
-一项任务从沙盒中启动，由 Agent 完成交互并产生轨迹，随后交给独立验证器评分。通过验证的轨迹经过筛选和转换，用于 SFT、偏好学习或在线 RL；训练后的模型再回到未见任务中复评。
-
-## 第一阶段
-
-第一版优先完成：
-
-- 本地 Docker 和进程沙盒；
-- Harbor/EFE 任务适配；
-- 一个原生 RUA 环境适配；
-- Codex、Claude Code 和 OpenAI-compatible Agent；
-- 并行 rollout 与统一轨迹记录；
-- 独立验证器和错误分类；
-- 轨迹到 SFT、偏好和 RL 数据的转换；
-- 接通至少一个开源训练后端；
-- 使用 held-out 任务完成训练后复评。
-
-当前仓库保留 EFE 的任务目录，并新增独立的 `worldline/` 平台层。RUA 已接入真实 MuJoCo 原生环境、
-现有 RUA socket 协议与 Harbor/EFE 任务包；支持模型工具 Agent、独立进程 rollout、可信评分、
-多模态轨迹、蒸馏数据和独立 Transformers SFT 训练入口。完整说明见
-[平台文档](docs/worldline/README.md)、[架构与模块分工](docs/worldline/architecture.md) 和
-[近期 RUA 论文调研](docs/worldline/research/rua-related-work.md)。
-
-先在 CPU 上运行 RUA 闭环：
+需要 Python 3.12–3.14。按用途安装 extras：`rua`、`cua`、`harbor`、`handoff`、`training`、`dev`。
 
 ```bash
 uv venv --python 3.12
-uv pip install -e '.[rua,dev]'
+uv pip install -e '.[rua,cua,handoff,dev]'
 source .venv/bin/activate
-worldline rollout examples/rua/reach-train examples/rua/reach-test --agent reference --max-workers 2
-worldline rollout examples/rua/reach-train --agent noop
-worldline distill runs/ --output-dir datasets/rua-v1
-worldline train examples/rua/sft.toml --dry-run
-```
-
-这是真实 MuJoCo 的小型平台集成示例，不是正式 benchmark 成绩。显式 test 轨迹不会进入训练导出；
-同源场景与分支通过 `split_group` 保持同集合。接入模型、既有 RUA 资产和实际训练的方法见
-[RUA 使用文档](docs/worldline/rua.md)。核心安装不强制依赖模拟器、Harbor 或训练库，按用途选择 extras；
-模型训练使用 `training` extra，含图像的 SFT 使用支持对应 processor 的外部训练器。
-
-安装后先检查本机是否具备运行条件：
-
-```bash
-uv tool install -e '.[harbor]' --with-executables-from harbor
+python -m playwright install chromium
 worldline doctor
+worldline doctor --backend rua
+worldline doctor --backend cua
 ```
 
-`framework_ready` 表示数据与编排工具可用，`evaluation_ready` 还要求 Harbor 和 Docker/Podman 可用。GPU RUA
-任务还需 NVIDIA 容器运行时；缺少容器运行时的机器仍可整理其他节点生成的 runs 并制作蒸馏数据。
+`doctor` 默认检查核心是否可用；native 检查表示依赖可用，实际环境启动仍以 rollout 为准。`doctor --backend harbor` 还检查容器 daemon 和 Compose，单有 Docker 可执行文件不会被判为可运行。
 
-可以先检查一个现有任务：
-
-```bash
-python -m worldline.cli inspect tasks/<benchmark>/<task>
-```
-
-也可以先规划一次评测，检查将要运行的命令并生成标准 Run 记录，而不启动沙盒：
+真实 RUA 小环境：
 
 ```bash
-worldline eval tasks/<benchmark>/<task> -a oracle --dry-run
-```
-
-去掉 `--dry-run` 后，Worldline 会调用 Harbor 执行任务，并在 `runs/<run-id>/` 下保存 `run.json`、
-`trace.jsonl` 和 `backend.log`。Harbor trial 会保存在该 Run 的 `harbor/` 子目录，执行结束后自动生成
-`result.normalized.json`；多次 attempt 还会汇总到 `results.normalized.json`。运行数据默认不提交到 Git。
-
-已有的 Harbor trial 可以直接归一化，不需要重新执行：
-
-```bash
-worldline ingest /path/to/jobs/<job>/<trial>
-```
-
-该命令会生成 `result.normalized.json`，统一记录 success、failure 或 infra_error、奖励、过程指标、
-token 使用量以及轨迹和视频的来源引用。大型产物不会被重复复制。
-
-将验证后的轨迹导出为训练数据：
-
-```bash
-# 成功轨迹，用于监督微调
-worldline export runs/ --format sft -o datasets/rua-sft.jsonl
-
-# 同一任务的成功/失败轨迹对，用于 DPO 等偏好学习
-worldline export runs/ --format preference -o datasets/rua-preference.jsonl
-
-# 所有可计数轨迹及其 reward，用于 RL
-worldline export runs/ --format rl -o datasets/rua-rl.jsonl
-
-# 按 task_id 切分，保证同一任务的不同 rollout 不会跨集合泄漏
-worldline split datasets/rua-sft.jsonl --output-dir datasets/rua-sft-split
-
-# 检查 JSONL、重复样本和不同集合间的任务重叠
-worldline validate-dataset \
-  datasets/rua-sft-split/train.jsonl \
-  datasets/rua-sft-split/validation.jsonl \
-  datasets/rua-sft-split/test.jsonl
-```
-
-通常直接用一条命令完成报告、三类数据导出、任务级切分和校验：
-
-```bash
+worldline rollout examples/rua/reach-train -a reference --batch-id rua-v1
+worldline rollout examples/rua/reach-test -a reference --batch-id rua-test
+worldline rollout examples/rua/reach-train -a noop --batch-id rua-failure
 worldline distill runs/ --output-dir datasets/rua-v1
 ```
 
-输出目录包含 `report.json`、原始 SFT/preference/RL JSONL、各自的 train/validation/test 切分和
-`manifest.json`。manifest 固化输入、参数、样本统计和校验结果，便于后续训练与复评追溯。
+真实 CUA 浏览器小环境：
 
-汇总评测结果：
+```bash
+worldline rollout examples/cua/form-train examples/cua/form-test \
+  -a cua-reference --max-workers 2 --batch-id cua-v1
+```
+
+参考策略用于检查平台链路。接入模型时使用工具 Agent；模型服务由用户选择的 serving 框架运行：
+
+```bash
+export WORLDLINE_API_KEY='your-key'
+worldline rollout examples/rua/reach-train \
+  -a openai-compatible -m your-model --base-url http://localhost:8000/v1 \
+  --max-workers 2 --cpu-budget 4 --batch-id model-v1
+```
+
+动作由环境的 JSON Schema 定义。模型只能观察、执行动作、在预算内 reset 和 finish，最终奖励来自运行器的可信 verifier 通道。RUA socket、多模态模型及正式 benchmark 入口见 [RUA 指南](docs/worldline/rua.md)；浏览器运行设置和源 benchmark 适配见 [CUA 指南](docs/worldline/cua.md)。
+
+## 批次与恢复
+
+```bash
+worldline batch-status model-v1
+worldline batch-stop model-v1
+worldline rollout examples/rua/reach-train \
+  -a openai-compatible -m your-model --base-url http://localhost:8000/v1 \
+  --max-workers 2 --cpu-budget 4 --batch-id model-v1 --resume
+```
+
+`batch-stop` 停止领取新 trial，让已经运行的 trial 按自身预算完成。待运行任务保留，恢复不消耗它们的 attempt。SQLite/WAL 保存领取、attempt 和结果；同一批次仅有一个 owner。恢复会校验任务/配置/Worldline 版本及已完成结果，缺失结果必须先修复，不能免费重跑。
+
+模型暂时故障在原上下文中重试；永久认证/endpoint 错误阻止后续调用。仅可恢复环境的暂时基础设施故障允许一次新环境重试，旧 attempt 和用量保留。Agent 失败不重试。CPU/GPU 参数是 admission 和独占设备 lease，硬资源限制仍由部署/容器层执行。批次控制目前针对原生 `rollout`；Harbor 正式运行遵循上游 runner 的重试规则。
+
+## 蒸馏和训练交付
 
 ```bash
 worldline report runs/ -o reports/evaluation.json
+worldline distill runs/ --output-dir datasets/experiment-v1
+worldline validate-dataset \
+  datasets/experiment-v1/splits/sft/train.jsonl \
+  datasets/experiment-v1/splits/sft/validation.jsonl \
+  datasets/experiment-v1/splits/sft/test.jsonl
+
+worldline training-handoff datasets/experiment-v1/splits/sft/train.jsonl \
+  --framework llama-factory --output-dir datasets/lf-package \
+  --model /path/to/model --template qwen2_vl
+worldline training-handoff datasets/experiment-v1/splits/sft/train.jsonl \
+  --framework verl --output-dir datasets/verl-package
 ```
 
-报告中的成功率只统计有可信 verdict 的成功和失败，基础设施错误单独计算，不会被当作 Agent 的失败。
+蒸馏输出报告、SFT/preference/RL JSONL、分组划分和 manifest。基础设施错误、被替代 attempt 与显式 held-out 轨迹不会进入训练导出；样本保存实际 split，训练入口拒收 test/evaluation/validation。历史轨迹没有 split 时需要用户审核其准入。ATIF 图片必须归档在 trial 的可信目录内，缺图或不支持的模态会计入拒收，不能把图片文件名当成视觉输入。
 
-多个任务可以按受控并发运行：
+LLaMA-Factory 包包含 ShareGPT、图片、dataset_info 和可修改配置；verl 包包含 SFT Parquet、图片字节、薄数据适配器和初始任务 prompt。用户在**独立训练环境**按包内说明运行。在线 RL 还需要新的环境 rollout 和 verifier reward bridge；历史 reward 无法直接评判新动作。完整说明见 [训练交付](docs/worldline/training-handoff.md)。
+
+完整数据包在导出和校验成功后发布；失败产物保留在单独的 `.failed-*` 目录，并在错误中给出位置。非空输出目录会拒绝覆盖。数据文件哈希使用流式读取，媒体按内容寻址去重。
+
+## 外部 EFE / Harbor 任务
 
 ```bash
-worldline eval-many \
-  tasks/<benchmark>/<task-a> \
-  tasks/<benchmark>/<task-b> \
-  -a codex -m <model> --max-workers 2
+uv pip install -e '.[harbor]'
+git submodule update --init third_party/embodied-first-exam
+worldline upstream-info
+worldline efe run --core --list
+worldline inspect third_party/embodied-first-exam/tasks/<benchmark>/<task>
+worldline eval third_party/embodied-first-exam/tasks/<benchmark>/<task> -a oracle --dry-run
 ```
 
-批次中的单个任务失败不会终止其他任务，所有 Run 和错误都会写入 batch manifest。GPU 环境建议从
-`--max-workers 1` 开始，确认显存和 simulator 资源互不冲突后再增加并发。
+也可以设置 `WORLDLINE_EFE_ROOT=/path/to/external/embodied-first-exam`，无需下载仓库中的 submodule。上游执行依赖由 `harbor` extra 或独立 EFE 环境提供；可用 `worldline efe --python /path/to/efe-env/bin/python run ...` 指定后者。目录索引接受 EFE 或 RUA 的外部 task handoff：
 
-## 后续方向
+```bash
+worldline rua-catalog /path/to/rua-handoff --split train -o datasets/rua-index.json
+worldline eval-catalog datasets/rua-index.json -a codex -m your-model --dry-run
+worldline ingest /path/to/harbor/trial --task-dir /path/to/reviewed/source/task
+```
 
-- 状态快照、恢复和多分支 rollout；
-- 反事实轨迹与失败驱动的数据蒸馏；
-- RUA 的视觉、控制和程序多层轨迹；
-- 分布式调度与云端沙盒；
-- 浏览器、桌面和移动端 CUA 适配；
-- 仿真到真实机器人的迁移与评测。
+上游任务内部路径和 DIGEST 保持原样。正式 EFE runs 仍使用其原生 Agent、隔离 verifier、网络和资源协议，Worldline 原生示例独立报告。
 
-## 项目原则
+## 开发
 
-- 环境只接入一次，训、蒸、评共用同一套协议。
-- 轨迹是核心数据对象，必须可追踪、可转换、可重放。
-- 最终奖励来自独立验证器，而不是 Agent 自报结果。
-- 训练集、开发集和隐藏测试集严格分离。
-- 先做好 RUA 的完整闭环，再扩展环境数量和任务领域。
+```bash
+python3 -m unittest discover -s tests -v
+ruff check worldline tests
+ruff format --check worldline tests
+```
+
+参见 [贡献指南](CONTRIBUTING.md)。GitHub Actions 配置保存在 [CI 模板](docs/worldline/ci/worldline.yml)，目前尚未注册为自动 workflow。

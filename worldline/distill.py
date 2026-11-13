@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 from typing import Any, Sequence
 
 from worldline.datasets import export_datasets, split_dataset, validate_datasets
 from worldline.report import write_report
 from worldline.run import write_json
+from worldline.storage import staged_directory
 
 
-def build_distillation_bundle(
+def _build_distillation_bundle(
     inputs: Sequence[Path],
     output_dir: Path,
     *,
@@ -70,3 +72,22 @@ def build_distillation_bundle(
     }
     write_json(output_dir / "manifest.json", manifest)
     return manifest
+
+
+def build_distillation_bundle(inputs: Sequence[Path], output_dir: Path, **options) -> dict[str, Any]:
+    destination = output_dir.resolve()
+    with staged_directory(destination) as stage:
+        manifest = _build_distillation_bundle(inputs, stage, **options)
+
+        def relocate(value):
+            if isinstance(value, str) and (value == str(stage) or value.startswith(str(stage) + "/")):
+                return str(destination) + value[len(str(stage)) :]
+            if isinstance(value, dict):
+                return {relocate(key): relocate(nested) for key, nested in value.items()}
+            if isinstance(value, list):
+                return [relocate(nested) for nested in value]
+            return value
+
+        for path in stage.rglob("*.json"):
+            write_json(path, relocate(json.loads(path.read_text())))
+        return relocate(manifest)

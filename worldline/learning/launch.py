@@ -13,6 +13,7 @@ from typing import Any
 
 from worldline.datasets import _jsonl, _record_split, validate_datasets
 from worldline.run import write_json
+from worldline.storage import file_sha256
 
 
 def train(config_path: Path, *, dry_run: bool = False) -> tuple[dict[str, Any], Path]:
@@ -71,7 +72,7 @@ def train(config_path: Path, *, dry_run: bool = False) -> tuple[dict[str, Any], 
         "inputs": [
             {
                 "path": str(path),
-                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "sha256": file_sha256(path),
                 "records": validation["records"][str(path)],
             }
             for path in inputs

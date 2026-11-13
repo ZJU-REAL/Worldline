@@ -28,12 +28,12 @@ flowchart LR
 | `worldline/domains/cua/`、`worldline/adapters/browsergym.py` | CUA 插件与 BrowserGym 协议/任务适配 | 浏览器环境与验证器 |
 | `worldline/adapters/` | Harbor/EFE、RUA 任务目录与既有协议转换 | 外部系统接入 |
 | `worldline/datasets.py`、`distill.py` | 轨迹转换、偏好配对、数据划分与校验 | 数据与蒸馏方法 |
-| `worldline/learning/` | 训练输入校验、作业清单、独立训练进程 | SFT/RL 后端与训练方法 |
+| `worldline/learning/`、`learning/formats/` | 训练输入校验、作业清单、独立训练进程 | SFT/RL 后端与训练方法 |
 | `worldline/trace.py`、`run.py`、`results.py`、`report.py` | 事件、结果、证据、成本和实验报告 | 可观测性与评测分析 |
 | `worldline/media.py` | 内容寻址二进制资产与完整性校验 | 视觉轨迹与数据存储 |
 | `examples/rua/` | 可运行的原生集成示例与训练配置 | 开发与文档验证 |
 | `tests/` | 平台、适配器、真实模拟器和数据边界测试 | 对应模块共同维护 |
-| `tasks/`、`images/`、`embodied_first_exam/` | 继承的 EFE benchmark 层 | 按 EFE 协议维护 |
+| `third_party/embodied-first-exam/` | 可选 EFE 上游 submodule，保留自己的完整布局 | 上游维护、平台适配与 pin 审核 |
 
 跨组协作以契约为边界：环境组提供 `Environment`，Harness 组提供 `Agent.run(task, sandbox)`，训练组消费 JSONL 和训练配置。环境不能导入 Agent、数据转换或训练器；训练器不能被任务启动。新增跨领域能力先进入通用层，坐标系、夹爪、机器人关节等保持在 RUA 内。
 
@@ -78,3 +78,7 @@ Python 接口 `evaluate_native(..., agent_factory=...)` 接受任意满足 `Agen
 `split_group` 将演示改写、场景变体和恢复分支绑定；显式 train/validation/test 划分优先于哈希划分，冲突直接失败。原始 benchmark 未声明 split 的历史轨迹不能自动证明训练准入，使用者应先补充并审核数据清单。训练入口拒绝 held-out/validation 记录进入 train，并校验跨文件 task/group 重叠。
 
 训练配置、输入哈希、计数、有效命令和退出状态写入训练 manifest。模型训练完成后通过模型服务重新接入 `rollout --agent openai-compatible`，在显式 test 任务上复评；部署模型服务由训练/服务后端承担。
+
+## 0.3 存储与上游边界
+
+核心包不再包含 EFE CLI/Harbor import hook。EFE 通过显式 checkout 适配，来源与 pin 见 [上游说明](upstreams.md)。`storage.py` 统一原子记录、媒体发布与整包交付；`runtime/resources.py` 负责资源 lease，`runtime/queue.py` 提供独立的批次查询和停止领取控制。训练格式按公共消息、LF、verl 分模块维护。Harbor 每个 normalized trial 保存 split/seed/version 元数据，catalog 的 split/group 传播到 run，切分结果也写回样本。

@@ -23,6 +23,7 @@ def evaluate_many_harbor(
     extra_args: Sequence[str] = (),
     dry_run: bool = False,
     max_workers: int = 1,
+    task_metadata: dict[Path, dict] | None = None,
 ) -> dict:
     if max_workers < 1:
         raise ValueError("max_workers must be at least 1")
@@ -40,6 +41,7 @@ def evaluate_many_harbor(
                 executable=executable,
                 extra_args=extra_args,
                 dry_run=dry_run,
+                task_metadata=(task_metadata or {}).get(task_dir.resolve()),
             )
             return {
                 "task_dir": str(task_dir.resolve()),

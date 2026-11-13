@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-import os
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
+from worldline.storage import publish_bytes
 
 
 def make_run_id(task_name: str) -> str:
@@ -36,10 +36,7 @@ class RunRecord:
 def write_json(path: Path, value: Any) -> None:
     """Atomically publish JSON so interrupted runs never leave half a record."""
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    publish_bytes(path, (json.dumps(value, ensure_ascii=False, allow_nan=False, indent=2) + "\n").encode("utf-8"))
 
 
 def write_record(run_dir: Path, record: RunRecord) -> None:
