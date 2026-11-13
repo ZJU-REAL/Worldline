@@ -18,6 +18,7 @@ from worldline.contracts import RunResult, SandboxCapabilities, Task
 from worldline.errors import BudgetExceeded, EnvironmentError, InvalidAction
 from worldline.tasks import NativeTask
 from worldline.media import hydrate_media
+from worldline.runtime.containment import worker_command, remove_container
 
 
 class ProcessEnvironment:
@@ -29,17 +30,66 @@ class ProcessEnvironment:
         self._request_lock = threading.RLock()
         self.deadline = time.monotonic() + definition.timeout_sec
         self.log = (run_dir / "worker.log").open("wb")
+        self.container = None
+        self.guard = None
         try:
-            self.process = subprocess.Popen(
-                [sys.executable, "-m", "worldline.runtime.worker"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=self.log,
-                start_new_session=True,
-                bufsize=0,
-                env={**os.environ, **(worker_env or {})},
-            )
+            command, self.container = worker_command(definition, run_dir, sys.executable, worker_env)
+            import queue
+
+            created = queue.Queue()
+
+            def launch():
+                # Linux PDEATHSIG follows the creating thread, not just its
+                # process. Keep that thread alive across HTTP/async callbacks.
+                try:
+                    process = subprocess.Popen(
+                        command,
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=self.log,
+                        start_new_session=True,
+                        bufsize=0,
+                        env={**os.environ, **(worker_env or {})},
+                    )
+                except BaseException as error:
+                    created.put((None, error))
+                    return
+                created.put((process, None))
+                process.wait()
+
+            self.launcher = threading.Thread(target=launch, daemon=True)
+            self.launcher.start()
+            self.process, error = created.get()
+            if error:
+                raise error
+            if self.container:
+                from worldline.runtime.container_guard import process_identity
+
+                self.guard = subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-m",
+                        "worldline.runtime.container_guard",
+                        str(os.getpid()),
+                        process_identity(os.getpid()),
+                        self.container,
+                    ],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=self.log,
+                    start_new_session=True,
+                )
         except BaseException:
+            if getattr(self, "process", None) is not None:
+                try:
+                    os.killpg(self.process.pid, signal.SIGKILL)
+                    self.process.wait(timeout=2)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+            try:
+                remove_container(self.container)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
             self.log.close()
             raise
         self.pending = b""
@@ -47,10 +97,29 @@ class ProcessEnvironment:
         self.execution: dict = {}
         self.deadline_abort = False
         self._closed = False
+        self.timings = {}
 
     def request(self, method: str, *, verification: bool = False, **payload: Any) -> Any:
-        with self._request_lock:
-            return self._request(method, verification=verification, **payload)
+        started = time.monotonic()
+        try:
+            with self._request_lock:
+                return self._request(method, verification=verification, **payload)
+        finally:
+            key = f"environment_{method}_s"
+            self.timings[key] = self.timings.get(key, 0) + time.monotonic() - started
+
+    def start_cancellation_monitor(self, check):
+        self.cancel_stop = threading.Event()
+
+        def monitor():
+            while not self.cancel_stop.wait(0.1):
+                if check():
+                    self.deadline_abort = True
+                    self.close(graceful=False)
+                    return
+
+        self.cancel_thread = threading.Thread(target=monitor, daemon=True)
+        self.cancel_thread.start()
 
     def _request(self, method: str, *, verification: bool = False, **payload: Any) -> Any:
         if self.process.poll() is not None:
@@ -107,7 +176,13 @@ class ProcessEnvironment:
         if "error" in response:
             error = response["error"]
             cls = InvalidAction if error["type"] == "InvalidAction" else EnvironmentError
-            raise cls(f"{error['type']}: {error['message']}")
+            if cls is InvalidAction:
+                raise InvalidAction(f"{error['type']}: {error['message']}")
+            raise EnvironmentError(
+                f"{error['type']}: {error['message']}",
+                code=error.get("code", "environment.error"),
+                retryable=error.get("retryable", False) is True,
+            )
         try:
             return hydrate_media(response["result"], self.run_dir)
         except (OSError, ValueError, KeyError, TypeError) as error:
@@ -142,10 +217,26 @@ class ProcessEnvironment:
             raise InvalidAction("environment does not support checkpoints")
         return self.request("restore", checkpoint=checkpoint)
 
+    def fork_restore(self, checkpoint):
+        return self.request("fork_restore", checkpoint=checkpoint)
+
     def close(self, *, graceful: bool = True) -> None:
         if self._closed:
             return
         self._closed = True
+        if hasattr(self, "cancel_stop"):
+            self.cancel_stop.set()
+        try:
+            remove_container(getattr(self, "container", None))
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        if getattr(self, "guard", None):
+            self.guard.stdin.close()
+            try:
+                self.guard.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                self.guard.kill()
+                self.guard.wait(timeout=2)
         if graceful and self.process.poll() is None:
             try:
                 descriptor = self.process.stdin.fileno()

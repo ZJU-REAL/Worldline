@@ -69,6 +69,7 @@ class MujocoReach:
                     "GPU lease selected a software renderer; use CPU rendering or configure the physical EGL device"
                 )
         self.steps = self.total_steps = 0
+        self.inherited_steps = 0
         self.checkpoint_config = hashlib.sha256(
             json.dumps(
                 {
@@ -110,6 +111,7 @@ class MujocoReach:
                 "visual_observations": self.renderer is not None,
                 "privileged_state": True,
                 "snapshot": True,
+                "fork": True,
             },
         }
 
@@ -172,6 +174,7 @@ class MujocoReach:
                 "joint_speed_rad_s": speed,
                 "sim_steps": float(self.steps * self.frame_skip),
                 "sim_steps_total": float(self.total_steps),
+                "sim_steps_executed": float(self.total_steps - self.inherited_steps),
             },
         )
 
@@ -194,6 +197,7 @@ class MujocoReach:
             "config": self.checkpoint_config,
             "state": state.tolist(),
             "steps": self.steps,
+            "cumulative_steps": self.total_steps,
             "cached_transforms": cached,
         }
 
@@ -239,6 +243,15 @@ class MujocoReach:
         self.steps = checkpoint["steps"]
         # Cumulative compute is deliberately never rewound.
         return self.observe()
+
+    def fork_restore(self, checkpoint):
+        cumulative = checkpoint["cumulative_steps"]
+        if type(cumulative) is not int or cumulative < checkpoint["steps"] * self.frame_skip:
+            raise ValueError("invalid fork compute counter")
+        observation = self.restore(checkpoint)
+        self.inherited_steps += max(0, cumulative - self.total_steps)
+        self.total_steps = max(self.total_steps, cumulative)
+        return observation
 
     def close(self) -> None:
         if self.renderer is not None:

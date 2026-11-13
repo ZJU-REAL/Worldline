@@ -75,7 +75,14 @@ class InteractiveSession:
                 "environment_config": dict(self.definition.environment_config),
                 "evaluation": {
                     key: getattr(self.definition, key)
-                    for key in ("timeout_sec", "max_actions", "max_turns", "reset_budget", "restore_budget")
+                    for key in (
+                        "timeout_sec",
+                        "max_actions",
+                        "max_turns",
+                        "reset_budget",
+                        "restore_budget",
+                        "fork_budget",
+                    )
                 },
             },
         )
@@ -87,6 +94,9 @@ class InteractiveSession:
         self.turns, self.done, self._closed = 0, False, False
         self.watchdog, self.watchdog_error, self.expired = None, None, False
         self.restores = 0
+        self.forks = 0
+        self.inherited_actions = self.inherited_turns = 0
+        self._fork_ledger = {"used": 0, "lock": threading.RLock()}
         self.checkpoint_ids = set()
         write_record(self.run_dir, self.record)
         write_json(self.run_dir / "task.json", asdict(self.task))
@@ -96,8 +106,17 @@ class InteractiveSession:
         self.trace.append(TraceEvent(self.run_id, kind, payload))
 
     @_serialized
-    def model_context(self, max_images=None):
-        return model_context(self.messages, root=self.run_dir, max_images=max_images)
+    def model_context(self, max_images=None, max_bytes=8 * 1024 * 1024):
+        context = model_context(
+            self.messages, root=self.run_dir, max_images=max_images, max_bytes=max_bytes, hydrate=False
+        )
+        self.emit(
+            "model.request_context",
+            {"messages": context, "tools": self.environment.spec["tools"] if self.environment else []},
+        )
+        from worldline.media import hydrate_media
+
+        return hydrate_media(context, self.run_dir)
 
     @_serialized
     def start(self):
@@ -124,6 +143,7 @@ class InteractiveSession:
                 "spec": public_spec(self.environment.spec),
                 "observation": initial,
                 "deadline": self.environment.deadline,
+                "remaining_sec": max(0, self.environment.deadline - time.monotonic()),
                 "run_id": self.run_id,
                 "task": {
                     "id": self.task.id,
@@ -144,6 +164,75 @@ class InteractiveSession:
                     self.finish()
         except Exception as error:
             self.watchdog_error = f"{type(error).__name__}: {error}"
+
+    def fork(self, checkpoint=None):
+        """Start an independent worker from a signed checkpoint, within an explicit budget.
+
+        Child and parent share the original deadline and data split/group, but
+        have separate verifier results and preserved lineage. Hosted agents do
+        not receive this trusted controller method.
+        """
+        import copy
+
+        with self.lock:
+            if self.view is None or self.done or self.result is not None:
+                raise RuntimeError("session is not active")
+            with self._fork_ledger["lock"]:
+                if self._fork_ledger["used"] >= self.definition.fork_budget:
+                    raise BudgetExceeded("fork budget exhausted")
+                self._fork_ledger["used"] += 1
+            checkpoint = checkpoint or self.checkpoint()
+            digest = hashlib.sha256(json.dumps(checkpoint, sort_keys=True, allow_nan=False).encode()).hexdigest()
+            if digest not in self.checkpoint_ids:
+                raise ValueError("fork checkpoint was not issued by this session")
+            self.forks += 1
+            deadline = self.environment.deadline
+            messages = copy.deepcopy(self.messages)
+            actions, resets, turns = self.view.actions, self.view.resets, self.turns
+            call_ids = set(self.call_ids)
+        options = {
+            "runs_dir": self.run_dir.parent,
+            "agent_name": self.record.agent,
+            "model": self.record.model,
+            "harness_version": self.record.metadata["harness_version"],
+            "agent_config": self.record.metadata["agent_config"],
+        }
+        if hasattr(self, "resources"):
+            options["resources"] = self.resources
+        child = type(self)(Path(self.task.metadata["task_dir"]), **options)
+        child._fork_ledger = self._fork_ledger
+        try:
+            child.start()
+            child.watchdog.cancel()
+            child.environment.deadline = deadline
+            observation = child.environment.fork_restore(checkpoint["state"])
+            child.view.actions, child.view.resets, child.turns = actions, resets, turns
+            child.inherited_actions, child.inherited_turns = actions, turns
+            child.call_ids = call_ids
+            child.messages[:] = child.media.import_references(messages, self.run_dir)
+            content = observation_content(observation)
+            notice = "The trusted controller forked from a checkpoint. This observation is the current state; earlier actions and runtime budgets remain recorded."
+            content = (
+                [{"type": "text", "text": notice}, *content] if isinstance(content, list) else notice + "\n" + content
+            )
+            child.messages.append(child.media.externalize({"role": "user", "content": content}))
+            child.record = replace(
+                child.record,
+                metadata={
+                    **child.record.metadata,
+                    "lineage": {"parent_run_id": self.run_id, "checkpoint_sha256": digest, "kind": "fork"},
+                },
+            )
+            write_record(child.run_dir, child.record)
+            child.emit("environment.forked", child.record.metadata["lineage"])
+            child.watchdog = threading.Timer(max(0, deadline - time.monotonic()), child._expire)
+            child.watchdog.daemon = True
+            child.watchdog.start()
+            self.emit("environment.child_created", {"child_run_id": child.run_id, "checkpoint_sha256": digest})
+            return child
+        except BaseException as error:
+            child.abort(error)
+            raise
 
     @_serialized
     def checkpoint(self):
@@ -281,6 +370,7 @@ class InteractiveSession:
             if self.watchdog is not None:
                 self.watchdog.cancel()
             if self.environment is not None:
+                metrics.update(self.environment.timings)
                 try:
                     self.environment.close()
                 except Exception as cleanup_error:
@@ -289,10 +379,13 @@ class InteractiveSession:
             metrics.update(media_files=float(media_files), media_bytes=float(media_bytes))
             metrics.update(
                 n_actions=float(self.view.actions if self.view else 0),
+                n_actions_executed=float(self.view.actions - self.inherited_actions if self.view else 0),
                 n_turns=float(self.turns),
+                n_turns_executed=float(self.turns - self.inherited_turns),
                 n_resets=float(self.view.resets if self.view else 0),
                 task_deadline_expired=float(self.expired),
                 n_restores=float(self.restores),
+                n_forks=float(self.forks),
             )
             configuration = {
                 "task_version": self.task.version,

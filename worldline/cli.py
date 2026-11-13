@@ -110,6 +110,11 @@ def _build_parser() -> argparse.ArgumentParser:
     distill_parser.add_argument("--max-pairs-per-task", type=int, default=50)
     distill_parser.add_argument("--media-mode", choices=("inline", "reference"), default="reference")
     distill_parser.add_argument("--allow-unspecified-split", action="store_true")
+    for data_parser in (export_parser, distill_parser):
+        data_parser.add_argument("--quality-max-actions", type=int)
+        data_parser.add_argument("--quality-max-turns", type=int)
+        data_parser.add_argument("--max-tool-error-fraction", type=float, default=1.0)
+        data_parser.add_argument("--max-samples-per-task", type=int)
 
     commands.add_parser("plugins", help="List available environment plugins without importing simulators")
     rollout = commands.add_parser("rollout", help="Evaluate native tasks through a registered environment")
@@ -133,6 +138,19 @@ def _build_parser() -> argparse.ArgumentParser:
     rollout.add_argument("--harness-version", default="native-tools/0.2")
     rollout.add_argument("--cpu-budget", type=int)
     rollout.add_argument("--gpu-devices", default="")
+    rollout.add_argument("--resource-scope", choices=("host", "process"), default="host")
+    rollout.add_argument("--resource-dir", type=Path)
+    rollout.add_argument("--coordinator-url")
+    rollout.add_argument("--context-mb", type=int, default=8)
+    rollout.add_argument("--max-output-tokens", type=int, default=2048)
+    rollout.add_argument("--max-total-tokens", type=int)
+    rollout.add_argument("--temperature", type=float, default=0.0)
+    rollout.add_argument("--top-p", type=float, default=1.0)
+    rollout.add_argument("--sampling-seed", type=int)
+    rollout.add_argument("--model-revision")
+    rollout.add_argument("--endpoint-concurrency", type=int, default=4)
+    rollout.add_argument("--endpoint-rpm", type=int, default=0)
+    rollout.add_argument("--model-request-timeout", type=float, default=120)
     for name, help_text in (
         ("batch-status", "Read live durable batch status"),
         ("batch-stop", "Stop new trials and drain active ones"),
@@ -152,6 +170,23 @@ def _build_parser() -> argparse.ArgumentParser:
     handoff.add_argument("--parquet-batch-mb", type=int, default=8)
     handoff.add_argument("--max-record-mb", type=int, default=64)
     handoff.add_argument("--max-episode-media-mb", type=int, default=64)
+    handoff.add_argument("--tool-prose-policy", choices=("preserve", "reject", "omit"), default="preserve")
+    certification = commands.add_parser(
+        "check-plugin", help="Execute environment lifecycle and verifier contract checks"
+    )
+    certification.add_argument("task_dir", type=Path)
+    certification.add_argument("--output", type=Path)
+    training_check = commands.add_parser("training-check", help="Invoke the actual external trainer loader/collator")
+    training_check.add_argument("package", type=Path)
+    training_check.add_argument("--framework", choices=("llama-factory", "verl"), required=True)
+    training_check.add_argument("--model", required=True)
+    training_check.add_argument("--template", default="qwen")
+    training_check.add_argument("--expected-version")
+    training_check.add_argument("--output", type=Path)
+    experiment = commands.add_parser("experiment", help="Run a versioned evaluation/data handoff plan")
+    experiment.add_argument("config", type=Path)
+    experiment.add_argument("--dry-run", action="store_true")
+    experiment.add_argument("--resume", action="store_true")
     profile = commands.add_parser("profile-trace", help="Measure trace/media storage with a reproducible fixture")
     profile.add_argument("--output-dir", type=Path, required=True)
     profile.add_argument("--events", type=int, default=100)
@@ -191,6 +226,15 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if args.command in {"export", "distill"}:
+        from worldline.learning.quality import QualityPolicy
+
+        quality = QualityPolicy(
+            max_actions=args.quality_max_actions,
+            max_turns=args.quality_max_turns,
+            max_tool_error_fraction=args.max_tool_error_fraction,
+            max_samples_per_task=args.max_samples_per_task,
+        )
     if args.command == "inspect":
         task = (
             load_native_task(args.task_dir).task
@@ -220,6 +264,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 0
     if args.command == "rollout":
+        model_options = {
+            "max_context_bytes": args.context_mb * 1024 * 1024,
+            "max_output_tokens": args.max_output_tokens,
+            "max_total_tokens": args.max_total_tokens,
+            "temperature": args.temperature,
+            "top_p": args.top_p,
+            "sampling_seed": args.sampling_seed,
+            "model_revision": args.model_revision,
+            "endpoint_concurrency": args.endpoint_concurrency,
+            "endpoint_rpm": args.endpoint_rpm,
+            "request_timeout_sec": args.model_request_timeout,
+        }
         if args.agent == "openai-compatible":
             if not args.model:
                 parser.error("openai-compatible requires --model")
@@ -232,6 +288,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 api_key_env=args.api_key_env,
                 max_retries=args.model_retries,
                 max_context_images=args.context_images,
+                **model_options,
             )
         else:
             from worldline.domains.rua.reference import ReachReferenceAgent
@@ -255,6 +312,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "api_key_env": args.api_key_env,
                 "model_retries": args.model_retries,
                 "max_context_images": args.context_images,
+                **model_options,
             }
             if args.agent == "openai-compatible"
             else {"policy": args.agent},
@@ -263,9 +321,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_infra_retries=args.max_infra_retries,
             cpu_budget=args.cpu_budget,
             gpu_devices=tuple(device for device in args.gpu_devices.split(",") if device),
+            resource_scope=args.resource_scope,
+            resource_dir=args.resource_dir,
+            coordinator_url=args.coordinator_url,
         )
         print(json.dumps(manifest, ensure_ascii=False, indent=2))
-        return 2 if any(manifest["statuses"].get(key) for key in ("error", "infra_error", "blocked", "pending")) else 0
+        return (
+            2
+            if any(
+                manifest["statuses"].get(key)
+                for key in ("error", "infra_error", "blocked", "pending", "orphaned", "remote_completed")
+            )
+            else 0
+        )
     if args.command in {"batch-status", "batch-stop"}:
         try:
             result = (batch_status if args.command == "batch-status" else request_stop)(args.batch_id, args.runs_dir)
@@ -286,11 +354,40 @@ def main(argv: Sequence[str] | None = None) -> int:
                 parquet_batch_bytes=args.parquet_batch_mb * 1024 * 1024,
                 max_record_bytes=args.max_record_mb * 1024 * 1024,
                 max_media_bytes=args.max_episode_media_mb * 1024 * 1024,
+                tool_prose_policy=args.tool_prose_policy,
             )
         except (ValueError, OSError, KeyError) as error:
             parser.error("\n".join([str(error), *getattr(error, "__notes__", [])]))
         print(json.dumps(manifest, ensure_ascii=False, indent=2))
         return 0
+    if args.command in {"check-plugin", "training-check", "experiment"}:
+        try:
+            if args.command == "check-plugin":
+                from worldline.certification import certify_environment
+
+                result = certify_environment(args.task_dir)
+            elif args.command == "training-check":
+                from worldline.learning.check_package import check_package
+
+                result = check_package(
+                    args.package,
+                    framework=args.framework,
+                    model=args.model,
+                    template=args.template,
+                    expected_version=args.expected_version,
+                )
+            else:
+                from worldline.experiment import run_experiment
+
+                result = run_experiment(args.config, dry_run=args.dry_run, resume=args.resume)
+            if getattr(args, "output", None):
+                from worldline.run import write_json
+
+                write_json(args.output, result)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0 if result.get("passed", True) else 2
+        except (ValueError, OSError, KeyError, ImportError, RuntimeError) as error:
+            parser.error(str(error))
     if args.command == "profile-trace":
         report = profile_trace(args.output_dir, events=args.events, unique_images=args.unique_images)
         print(json.dumps(report, indent=2))
@@ -376,6 +473,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_pairs_per_task=args.max_pairs_per_task,
             media_mode=args.media_mode,
             allow_unspecified_split=args.allow_unspecified_split,
+            quality_policy=quality,
         )
         print(json.dumps(manifest, ensure_ascii=False, indent=2))
         return 0
@@ -450,6 +548,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_pairs_per_task=args.max_pairs_per_task,
             media_mode=args.media_mode,
             allow_unspecified_split=args.allow_unspecified_split,
+            quality_policy=quality,
         )
         print(
             json.dumps(

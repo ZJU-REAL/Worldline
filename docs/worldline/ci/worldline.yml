@@ -11,14 +11,28 @@ permissions:
 
 jobs:
   platform:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        python: ['3.12', '3.13']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: ${{ matrix.python }}
       - run: python -m pip install -e '.[rua,cua,handoff,dev]'
       - run: python -m playwright install --with-deps chromium
+        env:
+          PLAYWRIGHT_DOWNLOAD_HOST: https://cdn.playwright.dev/dbazure/download/playwright
       - run: python3 -m unittest discover -s tests -v
       - run: ruff check worldline tests
       - run: ruff format --check worldline tests
+      - run: worldline check-plugin examples/rua/reach-train
+      - run: python -m pip install build && python -m build
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: platform-${{ matrix.python }}
+          path: |
+            reports/platform-check/
+            dist/

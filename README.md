@@ -2,9 +2,9 @@
 
 Worldline 为需要有状态环境的 Agent 提供评测、教师 rollout、轨迹蒸馏和训练数据交付。RUA 是首个 Domain；CUA 已接入真实 BrowserGym 浏览器。环境、Agent Harness、可信验证器和外部训练器通过独立接口协作。
 
-目前是**单机研发框架**。真实 MuJoCo 和浏览器示例用于验证基础设施；正式大型机器人 benchmark、桌面 VM、分布式调度及在线 RL 环境桥仍需接入和验收。
+目前是研发框架，支持本地运行、主机多进程资源协调和可选中央任务 lease。正式机器人 benchmark、桌面 VM、GPU 与真实模型/训练作业的最终验收由部署者在对应资源执行。
 
-0.4 版补齐 Native/Harbor 持久化恢复、长视觉轨迹引用、字节预算、真实 API 工具 Agent 的 CUA 链路，以及外部训练循环的有状态 session 和受控 RUA checkpoint/restore。已有 EFE 上游边界保留为可选 submodule。实现、性能测量及边界见 [本轮复审](docs/worldline/iteration-04.md)。
+0.5 版加入 owned RUA/OSWorld provider、独占会话身份、主机资源锁、中央 lease、硬 deadline HTTP、完整 interaction context 预算、磁盘数据索引、LF prose/tool 保真 formatter、在线 episode service/verl tool adapter、受控独立 fork 和可执行验收计划。EFE 保持可选上游 submodule。实现和验证边界见 [本轮复审](docs/worldline/iteration-05.md)。
 
 ## 目录和依赖
 
@@ -104,7 +104,7 @@ worldline training-handoff datasets/experiment-v1/splits/sft/train.jsonl \
 
 蒸馏输出报告、SFT/preference/RL JSONL、分组划分和 manifest。基础设施错误、被替代 attempt 与显式 held-out 轨迹不会进入训练导出；样本保存实际 split，训练入口拒收 test/evaluation/validation。未声明 split 的历史轨迹默认排除，审核后才可显式使用 `--allow-unspecified-split`。ATIF 图片必须归档在 trial 的可信目录内，缺图或不支持的模态会计入拒收，不能把图片文件名当成视觉输入。
 
-LLaMA-Factory 包包含 ShareGPT、图片、dataset_info 和可修改配置；verl 包包含 SFT Parquet、图片字节、薄数据适配器和初始任务 prompt。用户在**独立训练环境**按包内说明运行。在线 RL 还需要新的环境 rollout 和 verifier reward bridge；历史 reward 无法直接评判新动作。完整说明见 [训练交付](docs/worldline/training-handoff.md)。
+LLaMA-Factory 包包含 ShareGPT、图片、dataset_info、原生模板的 prose/tool formatter entry 和可修改配置；verl 包包含 SFT Parquet、图片字节、薄数据适配器和初始任务 prompt。两者都附 canonical messages 和实际 trainer loader-check。用户在**独立训练环境**按包内说明运行。在线 RL 使用新的环境 rollout 和可信 verifier reward；历史 reward 无法评判新动作。完整说明见 [训练交付](docs/worldline/training-handoff.md) 和 [最终验收](docs/worldline/acceptance.md)。
 
 完整数据包在导出和校验成功后发布；失败产物保留在单独的 `.failed-*` 目录，并在错误中给出位置。非空输出目录会拒绝覆盖。数据文件哈希使用流式读取，媒体按内容寻址去重。distill 默认输出媒体引用，JSONL/Parquet 有字节预算，可配置 `--parquet-batch-mb` 和 `--max-record-mb`。
 
@@ -160,3 +160,17 @@ python -m worldline.development check
 ```
 
 本仓库使用配置的人类作者身份，不添加 AI 作者或 AI 共同作者标记。检查缓存只匹配同一源码/环境并短期有效。
+
+## 环境供应、协调与最终验收
+
+`rua.managed` 管理每个 trial 的模拟器启动和回收；`cua.desktop` 接入独立 OSWorld controller。预先启动的 socket 需要 session descriptor 和独占领取，legacy 兼容必须显式声明。配置与 Docker 硬限制见 [环境供应](docs/worldline/provisioning.md)。
+
+```bash
+worldline check-plugin examples/rua/reach-train --output reports/rua-contract.json
+worldline rollout examples/rua/reach-train -a openai-compatible -m MODEL \
+  --context-images 4 --context-mb 8 --max-output-tokens 2048 \
+  --endpoint-concurrency 4 --endpoint-rpm 0 --resource-scope host
+worldline experiment examples/experiments/acceptance.toml --dry-run
+```
+
+实际运行先填写计划中的模型、版本、任务与资源。该计划分开教师数据交付和训练后复评，不假定外部训练已经完成。跨运行器可配置 `--coordinator-url`；未知状态过期保留 orphaned。说明见 [协调](docs/worldline/distributed.md)、[验收入口](docs/worldline/acceptance.md)。

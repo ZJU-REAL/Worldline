@@ -7,6 +7,7 @@ from worldline.plugins import EnvironmentPlugin
 
 def plugins():
     from worldline.adapters.browsergym import BrowserGymEnvironment
+    from worldline.adapters.desktop import DesktopEnvironment
 
     version = hashlib.sha256(Path(BrowserGymEnvironment.source_path()).read_bytes()).hexdigest()
     return (
@@ -17,4 +18,5 @@ def plugins():
             BrowserGymEnvironment,
             preflight=BrowserGymEnvironment.preflight,
         ),
+        EnvironmentPlugin("cua.desktop", "cua", "worldline.desktop/0.1", DesktopEnvironment, restartable=False),
     )

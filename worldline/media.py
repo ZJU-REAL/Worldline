@@ -6,6 +6,7 @@ import base64
 import hashlib
 from pathlib import Path
 from typing import Any
+from collections import OrderedDict
 from worldline.storage import publish_bytes, publish_file, file_sha256
 
 MARKER = "__worldline_media__"
@@ -17,7 +18,7 @@ class MediaStore:
         self.root = root.resolve()
         self.files_written = 0
         self.bytes_written = 0
-        self.imported = set()
+        self.imported = OrderedDict()
 
     def import_file(self, path: Path, mime_type: str, encoding: str, *, sha256: str | None = None) -> dict:
         digest = sha256 or file_sha256(path)
@@ -36,7 +37,9 @@ class MediaStore:
             elif publish_file(path, destination, sha256=digest):
                 self.files_written += 1
                 self.bytes_written += stat.st_size
-            self.imported.add(key)
+            self.imported[key] = True
+            if len(self.imported) > 4096:
+                self.imported.popitem(last=False)
         return {MARKER: {"path": str(relative), "sha256": digest, "mime_type": mime_type, "encoding": encoding}}
 
     def import_references(self, value: Any, origin: Path) -> Any:
@@ -61,7 +64,7 @@ class MediaStore:
             if publish_bytes(path, raw, exclusive=True):
                 self.files_written += 1
                 self.bytes_written += len(raw)
-        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+        if file_sha256(path) != digest:
             raise ValueError("existing media artifact hash mismatch")
         return {MARKER: {"path": str(relative), "sha256": digest, "mime_type": mime_type, "encoding": encoding}}
 
@@ -80,9 +83,12 @@ class MediaStore:
         return value
 
     def inventory(self) -> tuple[int, int]:
-        files = list((self.root / "media").glob("*"))
-        files = [path for path in files if path.is_file() and not path.name.startswith(".")]
-        return len(files), sum(path.stat().st_size for path in files)
+        count, size = 0, 0
+        for path in (self.root / "media").glob("*"):
+            if path.is_file() and not path.name.startswith("."):
+                count += 1
+                size += path.stat().st_size
+        return count, size
 
 
 def media_path(reference: dict, root: Path, *, verify: bool = True) -> Path:
@@ -118,7 +124,7 @@ def hydrate_media(value: Any, root: Path) -> Any:
     return value
 
 
-def model_context(messages, *, root: Path | None = None, max_images: int | None = None):
+def model_context(messages, *, root: Path | None = None, max_images: int | None = None, max_bytes=None, hydrate=True):
     """Hydrate only retained visual inputs; keep all text/tool message ordering."""
     if max_images is not None and (type(max_images) is not int or max_images < 0):
         raise ValueError("context image budget must be a nonnegative integer")
@@ -140,7 +146,26 @@ def model_context(messages, *, root: Path | None = None, max_images: int | None 
             value["content"] = list(reversed(parts))
         selected.append(value)
     result = list(reversed(selected))
-    return hydrate_media(result, root) if root is not None else result
+    if max_bytes is not None:
+        import json
+        from worldline.agents.context import bounded_context
+
+        def size(value):
+            measured = len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode())
+            if root:
+                for message in value:
+                    if isinstance(message.get("content"), list):
+                        for part in message["content"]:
+                            if part.get("type") == "image_url":
+                                url = part["image_url"]["url"]
+                                if isinstance(url, dict) and MARKER in url:
+                                    measured += (
+                                        4 * ((media_path(url, root, verify=False).stat().st_size + 2) // 3) + 100
+                                    )
+            return measured
+
+        result, _ = bounded_context(result, max_bytes, measure=size)
+    return hydrate_media(result, root) if root is not None and hydrate else result
 
 
 class MessageHistory(list):
@@ -159,5 +184,5 @@ class MessageHistory(list):
     def __setitem__(self, key, value):
         super().__setitem__(key, self.media.externalize(value))
 
-    def model_context(self, max_images=None):
-        return model_context(self, root=self.media.root, max_images=max_images)
+    def model_context(self, max_images=None, max_bytes=None, hydrate=True):
+        return model_context(self, root=self.media.root, max_images=max_images, max_bytes=max_bytes, hydrate=hydrate)

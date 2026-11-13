@@ -90,3 +90,13 @@ Python 接口 `evaluate_native(..., agent_factory=...)` 接受任意满足 `Agen
 Worker 二进制通过共享内容寻址产物传递，模型历史用引用保留；只在模型请求中恢复选定图片。蒸馏默认同样保留引用，交付按 manifest 根目录定位，Parquet 同时限制行数与字节。
 
 Checkpoint 是可选 `CheckpointEnvironment` 协议：可信 controller 校验 task/环境版本和 session 签发记录，只有声明的 restore_budget 可消耗。模型公开工具不增加恢复能力；累计动作、计算步数和墙钟不回退。当前验证的是 MuJoCo fixture，其他环境保持能力关闭。
+
+## 0.5 供应、请求与训练边界
+
+`runtime/provisioning.py` 管理 owned/borrowed 外部会话；`shared_resources.py` 协调主机进程，`coordinator.py` 提供可选跨运行器 lease。`containment.py` 和独立 guard 管理 Docker 硬限制与回收。它们都不包含领域动作或训练算法。
+
+`runtime/http.py`/`http_worker.py` 是公共 deadline I/O。Agent 层只在 `agents/transport.py` 映射模型错误，环境/controller/coordinator 不依赖模型客户端。`agents/context.py` 裁剪完整 turn group，`media.py` 在解码前按引用文件尺寸控制上下文。请求视图与完整归档分开记录。
+
+`data_index.py` 管理磁盘去重/划分/overlap；`learning/quality.py` 是显式数据质量规则。`learning/llama_factory_entry.py`、`verl_dataset.py` 和 `check_package.py` 在独立训练环境使用；框架不会在 task/simulator 中导入它们。`learning/bridge.py`/`service.py` 保存 episode，`verl_tools.py` 为可选 trainer adapter，per-tool release 不销毁环境。
+
+MuJoCo fork 创建独立 worker，并用环境自己的 fork_restore 继承计算计数。controller 共享整棵分支树的 fork quota、原截止时间与已用动作/turn/reset，保存 parent/checkpoint lineage；模型公开能力保持关闭。`experiment.py` 只编排评测/教师/数据交付，外部训练和训练后复评保持独立。

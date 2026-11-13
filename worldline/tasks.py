@@ -23,6 +23,7 @@ class NativeTask:
     max_turns: int
     reset_budget: int
     restore_budget: int = 0
+    fork_budget: int = 0
 
 
 def load_native_task(task_dir: Path) -> NativeTask:
@@ -52,10 +53,11 @@ def load_native_task(task_dir: Path) -> NativeTask:
             "max_turns": 100,
             "reset_budget": 0,
             "restore_budget": 0,
+            "fork_budget": 0,
         }.items()
     }
     for key, value in values.items():
-        minimum = 0 if key in {"reset_budget", "restore_budget"} else 1
+        minimum = 0 if key in {"reset_budget", "restore_budget", "fork_budget"} else 1
         if type(value) is not int or value < minimum:
             raise ValueError(f"{key} must be an integer >= {minimum}")
     instruction = (task_dir / "instruction.md").read_text(encoding="utf-8")

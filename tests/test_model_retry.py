@@ -4,7 +4,6 @@ import json
 import threading
 import time
 import unittest
-import io
 from types import SimpleNamespace
 from unittest.mock import patch
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -21,9 +20,7 @@ class ModelRetryTest(unittest.TestCase):
             "usage": {"prompt_tokens": 3, "completion_tokens": float("nan")},
             "choices": [{"message": {"role": "assistant", "content": "done"}}],
         }
-        with patch(
-            "worldline.agents.tool_agent.urllib.request.urlopen", return_value=io.BytesIO(json.dumps(payload).encode())
-        ):
+        with patch("worldline.agents.tool_agent.http_completion", return_value=payload):
             self.assertEqual(agent._completion()["content"], "done")
         self.assertEqual(agent.usage["prompt_tokens"], 3)
         self.assertNotIn("completion_tokens", agent.usage)
@@ -33,9 +30,7 @@ class ModelRetryTest(unittest.TestCase):
     def test_malformed_provider_message_is_an_unscorable_provider_error(self):
         agent = self.agent(SimpleNamespace(server_port=0), [])
         payload = {"choices": [{"message": {"role": "assistant", "content": float("nan")}}]}
-        with patch(
-            "worldline.agents.tool_agent.urllib.request.urlopen", return_value=io.BytesIO(json.dumps(payload).encode())
-        ):
+        with patch("worldline.agents.tool_agent.http_completion", return_value=payload):
             with self.assertRaises(ModelAPIError) as caught:
                 agent._completion()
         self.assertEqual(caught.exception.code, "model.http.422")

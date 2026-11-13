@@ -29,6 +29,7 @@ def _export_handoff(
     parquet_batch_bytes: int = 8 * 1024 * 1024,
     max_record_bytes: int = 64 * 1024 * 1024,
     max_media_bytes: int = 64 * 1024 * 1024,
+    tool_prose_policy: str = "preserve",
 ):
     if framework not in {"llama-factory", "verl"}:
         raise ValueError("unsupported training framework")
@@ -47,13 +48,17 @@ def _export_handoff(
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "data").mkdir()
     media = MediaStore(output_dir)
+    from worldline.data_index import DiskIndex
+
     counts, rejected, thoughts = {}, {}, 0
+    training_image_records = 0
     dataset_info, buffer_stats = {}, {}
     for split, path in zip(("train", "validation"), inputs):
         count, failures = 0, 0
         source_root = dataset_media_root(path, media_root)
         writers = []
-        seen_prompts = set()
+        seen_prompts = DiskIndex()
+        canonical = (output_dir / "data" / f"{split}-worldline.jsonl").open("w")
         if framework == "llama-factory":
             stream = (output_dir / "data" / f"{split}.jsonl").open("w")
         else:
@@ -111,7 +116,11 @@ def _export_handoff(
                 try:
                     if framework == "llama-factory":
                         converted, lost = llama_factory_record(
-                            row, media, source_root=source_root, max_media_bytes=max_media_bytes
+                            row,
+                            media,
+                            source_root=source_root,
+                            max_media_bytes=max_media_bytes,
+                            tool_prose_policy=tool_prose_policy,
                         )
                         thoughts += lost
                         stream.write(json.dumps(converted, ensure_ascii=False) + "\n")
@@ -162,11 +171,17 @@ def _export_handoff(
                             writers[1].append_prepared(prepared_rl)
                             seen_prompts.add(key)
                     count += 1
+                    training_image_records += bool(converted["images"] if framework == "llama-factory" else images)
+                    portable = dict(row)
+                    portable["messages"] = media.import_references(row["messages"], source_root)
+                    canonical.write(json.dumps(portable, ensure_ascii=False, allow_nan=False) + "\n")
                 except (ValueError, KeyError, TypeError) as error:
                     failures += 1
                     rejected_stream.write(json.dumps({"id": row.get("id"), "error": str(error)}) + "\n")
         finally:
             rejected_stream.close()
+            canonical.close()
+            seen_prompts.close()
             if framework == "llama-factory":
                 stream.close()
             for writer in writers:
@@ -192,7 +207,10 @@ def _export_handoff(
         raise ValueError("no valid training samples; inspect rejected-train.jsonl")
     if framework == "llama-factory":
         write_json(output_dir / "dataset_info.json", dataset_info)
-        config = f"model_name_or_path: {json.dumps(model)}\ntemplate: {json.dumps(template)}\nstage: sft\ndo_train: true\nfinetuning_type: lora\ndataset_dir: .\ndataset: worldline_train\noutput_dir: models/student\noverwrite_output_dir: false\nper_device_train_batch_size: 1\ngradient_accumulation_steps: 8\nlearning_rate: 0.00002\nnum_train_epochs: 1\ncutoff_len: 4096\n"
+        effective_template = (
+            "worldline__" + template.removeprefix("worldline__") if tool_prose_policy == "preserve" else template
+        )
+        config = f"model_name_or_path: {json.dumps(model)}\ntemplate: {json.dumps(effective_template)}\nstage: sft\ndo_train: true\nfinetuning_type: lora\ndataset_dir: .\ndataset: worldline_train\noutput_dir: models/student\noverwrite_output_dir: false\nper_device_train_batch_size: 1\ngradient_accumulation_steps: 8\nlearning_rate: 0.00002\nnum_train_epochs: 1\ncutoff_len: 4096\n"
         if counts.get("validation"):
             config += "eval_dataset: worldline_validation\neval_strategy: epoch\n"
         (output_dir / "llama_factory_sft.yaml").write_text(config)
@@ -204,15 +222,25 @@ def _export_handoff(
         (output_dir / "verl_data.yaml").write_text(
             "data:\n  train_files: data/train.parquet\n  messages_key: messages\n  tools_key: tools\n  image_key: images\n  custom_cls:\n    path: adapters/verl_sft_dataset.py\n    name: WorldlineSFTDataset\n"
         )
+    (output_dir / "adapters").mkdir(exist_ok=True)
+    if framework == "llama-factory":
+        (output_dir / "adapters/llama_factory_entry.py").write_text(
+            Path(__file__).with_name("llama_factory_entry.py").read_text()
+        )
+    (output_dir / "adapters/check_package.py").write_text(Path(__file__).with_name("check_package.py").read_text())
     (output_dir / "README.md").write_text(
         "# Worldline training handoff\n\nRun training from this directory so relative image/data paths resolve.\n\n"
         + (
-            "Install LLaMA-Factory separately, choose model/template, then run `llamafactory-cli train llama_factory_sft.yaml`.\n"
-            "Tool decisions are function_call outputs; simultaneous assistant prose is retained in original Worldline traces and counted as omitted from function-only supervision.\n"
+            "Install LLaMA-Factory separately, choose model/template, then run `python adapters/llama_factory_entry.py llama_factory_sft.yaml` for preserve policy, or `llamafactory-cli train llama_factory_sft.yaml` for explicit reject/omit policies.\n"
+            "The preserve entry registers a copy of your native template with a formatter that retains assistant prose plus native tool-call syntax. No trainer algorithm or simulator dependency is changed.\n"
             if framework == "llama-factory"
             else "Install verl separately. SFT Parquet uses the included thin MultiTurnSFTDataset adapter to decode JSON messages and tool schemas. Merge verl_data.yaml into your version's trainer configuration; supply tokenizer/model and multimodal processor when images exist.\n"
             "*-rl.parquet contains initial prompts only, never teacher actions as the prompt. ground_truth is a task identity, not a recorded score. Online RUA/CUA RL additionally requires an environment AgentLoop and verifier reward bridge; recorded rollout rewards cannot score newly generated responses.\n"
         )
+        + "\nBefore training, run `python adapters/check_package.py . --framework "
+        + framework
+        + " --model /local/model --expected-version YOUR_INSTALLED_VERSION --output loader-check.json`. This invokes your actual trainer dataset/collator and checks labels and multimodal inputs.\n"
+        + "Canonical data/*-worldline.jsonl keeps original messages and tool/prose content with portable media references. LLaMA-Factory defaults to preserve; native CLI cannot silently ignore prose because the generated template alias requires the included entry. Explicit omit policy is recorded and rejected by strict loader checks.\n"
     )
     manifest = {
         "schema_version": "worldline.handoff/0.1",
@@ -220,7 +248,9 @@ def _export_handoff(
         "records": counts,
         "rejected": rejected,
         "function_only_prose_omissions": thoughts,
+        "tool_prose_policy": tool_prose_policy,
         "media_files": media.files_written,
+        "training_image_records": training_image_records,
         "byte_budgets": {
             "parquet_batch": parquet_batch_bytes,
             "record": max_record_bytes,

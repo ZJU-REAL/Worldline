@@ -9,7 +9,7 @@ from typing import Any, Sequence
 from worldline.datasets import export_datasets, split_dataset, validate_datasets
 from worldline.report import write_report
 from worldline.run import write_json
-from worldline.storage import staged_directory
+from worldline.storage import staged_directory, file_sha256
 
 
 def _build_distillation_bundle(
@@ -24,6 +24,7 @@ def _build_distillation_bundle(
     max_pairs_per_task: int = 50,
     media_mode: str = "reference",
     allow_unspecified_split: bool = False,
+    quality_policy=None,
 ) -> dict[str, Any]:
     """Export, split, and validate all supported training views."""
 
@@ -40,6 +41,7 @@ def _build_distillation_bundle(
         media_mode=media_mode,
         media_root=output_dir,
         allow_unspecified_split=allow_unspecified_split,
+        quality_policy=quality_policy,
     )
     for format_name in ("sft", "preference", "rl"):
         raw_path = output_dir / "raw" / f"{format_name}.jsonl"
@@ -95,4 +97,11 @@ def build_distillation_bundle(inputs: Sequence[Path], output_dir: Path, **option
 
         for path in stage.rglob("*.json"):
             write_json(path, relocate(json.loads(path.read_text())))
-        return relocate(manifest)
+        final = relocate(manifest)
+        final["files"] = {
+            str(path.relative_to(stage)): file_sha256(path)
+            for path in stage.rglob("*")
+            if path.is_file() and path != stage / "manifest.json"
+        }
+        write_json(stage / "manifest.json", final)
+        return final

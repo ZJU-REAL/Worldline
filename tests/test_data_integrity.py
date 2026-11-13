@@ -120,7 +120,7 @@ class DataIntegrityTest(unittest.TestCase):
             output = root / "sft.jsonl"
             self.assertEqual(export_dataset([root / "runs"], output, format="sft")["records"], 1)
             self.assertEqual(json.loads(output.read_text())["messages"][0]["content"][1]["image_url"]["url"], image)
-            export_handoff(output, root / "package", framework="llama-factory")
+            export_handoff(output, root / "package", framework="llama-factory", tool_prose_policy="omit")
             row = json.loads((root / "package/data/train.jsonl").read_text())
             self.assertEqual(
                 (root / "package" / row["images"][0]).read_bytes(), (trajectory.parent / "screen.png").read_bytes()

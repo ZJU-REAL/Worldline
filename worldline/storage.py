@@ -15,6 +15,20 @@ def file_sha256(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def verify_package(directory: Path):
+    import json
+
+    directory = directory.resolve()
+    manifest = json.loads((directory / "manifest.json").read_text())
+    if not manifest.get("files"):
+        raise ValueError("package has no integrity manifest")
+    for name, expected in manifest["files"].items():
+        path = (directory / name).resolve()
+        if not path.is_relative_to(directory) or file_sha256(path) != expected:
+            raise ValueError(f"package file missing or changed: {name}")
+    return manifest
+
+
 def sync_directory(path: Path) -> None:
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
     try:

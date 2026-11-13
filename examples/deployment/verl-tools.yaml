@@ -1,0 +1,21 @@
+tools:
+  - class_name: worldline.learning.verl_tools.WorldlineEnvironmentTool
+    config:
+      type: native
+      endpoint: http://127.0.0.1:8770
+      api_key_env: WORLDLINE_TRAINING_KEY
+    tool_schema:
+      type: function
+      function:
+        name: worldline_environment
+        description: Operate the currently assigned environment; its initial specification defines action units and schema.
+        parameters:
+          type: object
+          properties:
+            op:
+              type: string
+              enum: [observe, act, reset, finish]
+            action:
+              type: object
+          required: [op]
+          additionalProperties: false

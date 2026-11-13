@@ -46,6 +46,8 @@ def main() -> int:
                         plugin = get_environment_plugin(task.environment)
                         if plugin.version != task.metadata["environment_version"]:
                             raise ValueError("environment version changed after task loading")
+                        if request.get("artifact_root"):
+                            os.environ["WORLDLINE_RUN_DIR"] = request["artifact_root"]
                         environment = plugin.factory(task, request["config"])
                         if request.get("artifact_root"):
                             media = MediaStore(Path(request["artifact_root"]))
@@ -70,6 +72,8 @@ def main() -> int:
                         result = environment.checkpoint()
                     elif method == "restore" and environment.spec().get("capabilities", {}).get("snapshot"):
                         result = environment.restore(request["checkpoint"])
+                    elif method == "fork_restore" and hasattr(environment, "fork_restore"):
+                        result = environment.fork_restore(request["checkpoint"])
                     elif method == "close":
                         break
                     else:
@@ -78,7 +82,14 @@ def main() -> int:
                 if media is not None:
                     response = media.externalize(response)
             except Exception as error:
-                response = {"error": {"type": type(error).__name__, "message": str(error)}}
+                response = {
+                    "error": {
+                        "type": type(error).__name__,
+                        "message": str(error),
+                        "code": getattr(error, "code", "environment.error"),
+                        "retryable": bool(getattr(error, "retryable", False)),
+                    }
+                }
             sys.stdout.write(json.dumps(response, allow_nan=False, separators=(",", ":")) + "\n")
             sys.stdout.flush()
     finally:

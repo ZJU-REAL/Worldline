@@ -4,7 +4,9 @@ import json
 from worldline.learning.formats.messages import normalized_messages
 
 
-def llama_factory_record(row, media, **options):
+def llama_factory_record(row, media, *, tool_prose_policy="preserve", **options):
+    if tool_prose_policy not in {"preserve", "reject", "omit"}:
+        raise ValueError("tool_prose_policy must be preserve, reject or omit")
     messages, images = normalized_messages(row, media, **options)
     conversations, system, dropped_thoughts = [], [], 0
     for message in messages:
@@ -15,14 +17,18 @@ def llama_factory_record(row, media, **options):
             system.append(content)
             continue
         if message.get("tool_calls"):
-            dropped_thoughts += int(bool(content))
-            content = json.dumps(
-                [
-                    {"name": call["function"]["name"], "arguments": json.loads(call["function"]["arguments"])}
-                    for call in message["tool_calls"]
-                ],
-                ensure_ascii=False,
-            )
+            if content and tool_prose_policy == "reject":
+                raise ValueError(
+                    "LLaMA-Factory function supervision cannot preserve simultaneous assistant prose; choose explicit omit policy or use canonical messages"
+                )
+            dropped_thoughts += int(bool(content) and tool_prose_policy == "omit")
+            calls = [
+                {"name": call["function"]["name"], "arguments": json.loads(call["function"]["arguments"])}
+                for call in message["tool_calls"]
+            ]
+            if content and tool_prose_policy == "preserve":
+                calls[0]["_worldline_assistant_prose"] = content
+            content = json.dumps(calls, ensure_ascii=False)
             tag = "function_call"
         else:
             tag = {"user": "human", "assistant": "gpt", "tool": "observation"}[role]

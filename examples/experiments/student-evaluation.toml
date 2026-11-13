@@ -1,0 +1,26 @@
+schema_version = "worldline.experiment/0.1"
+output_dir = "../../runs/student-evaluation-05"
+[[phase]]
+id = "rua-evaluation"
+backend = "native"
+tasks = ["../rua/reach-test"]
+max_workers = 1
+[phase.model]
+model = "REPLACE_WITH_TRAINED_STUDENT_MODEL"
+model_revision = "REPLACE_WITH_TRAINED_CHECKPOINT_HASH"
+base_url = "http://localhost:8000/v1"
+api_key_env = "WORLDLINE_API_KEY"
+endpoint_concurrency = 4
+endpoint_rpm = 0
+[[phase]]
+id = "cua-evaluation"
+backend = "native"
+tasks = ["../cua/form-test"]
+max_workers = 1
+[phase.model]
+model = "REPLACE_WITH_TRAINED_STUDENT_MODEL"
+model_revision = "REPLACE_WITH_TRAINED_CHECKPOINT_HASH"
+base_url = "http://localhost:8000/v1"
+api_key_env = "WORLDLINE_API_KEY"
+endpoint_concurrency = 4
+endpoint_rpm = 0

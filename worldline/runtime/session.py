@@ -37,6 +37,7 @@ def evaluate_native(
     logical_trial_id: str | None = None,
     attempt: int = 1,
     worker_env: dict[str, str] | None = None,
+    cancel_check: Callable | None = None,
 ) -> tuple[RunRecord, Path]:
     definition = load_native_task(task_dir)
     task = definition.task
@@ -66,6 +67,7 @@ def evaluate_native(
                 "max_turns": definition.max_turns,
                 "reset_budget": definition.reset_budget,
                 "restore_budget": definition.restore_budget,
+                "fork_budget": definition.fork_budget,
             },
         },
     )
@@ -104,6 +106,8 @@ def evaluate_native(
             if worker_env
             else ProcessEnvironment(definition, run_dir)
         )
+        if cancel_check:
+            environment.start_cancellation_monitor(cancel_check)
         initial = environment.start()
         record = replace(record, metadata={**record.metadata, "execution": environment.execution})
         write_record(run_dir, record)
@@ -124,6 +128,8 @@ def evaluate_native(
             deadline=environment.deadline,
         )
         runtime_config = runtime_configuration(agent)
+        if cancel_check and hasattr(agent, "cancel_check"):
+            agent.cancel_check = cancel_check
         json.dumps(runtime_config, allow_nan=False)
         record = replace(
             record,
@@ -145,6 +151,10 @@ def evaluate_native(
             timings["agent_duration_s"] = time.monotonic() - stage
             view.close()
         stage = time.monotonic()
+        if cancel_check and cancel_check():
+            from worldline.errors import EnvironmentError
+
+            raise EnvironmentError("run was cancelled by its lease owner", code="run.cancelled")
         verdict = environment.verify(task, run_dir)
         timings["verification_duration_s"] = time.monotonic() - stage
         outcome, reward, metrics = checked_verdict(verdict)
@@ -167,6 +177,7 @@ def evaluate_native(
             view.close()
             metrics.update(n_actions=float(view.actions), n_resets=float(view.resets))
         if environment is not None:
+            metrics.update(getattr(environment, "timings", {}))
             environment.close()
         write_json(
             run_dir / "agent" / "trajectory.json",

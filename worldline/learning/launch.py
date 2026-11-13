@@ -8,6 +8,8 @@ import sys
 import time
 import tomllib
 import uuid
+import os
+import signal
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +25,11 @@ def train(config_path: Path, *, dry_run: bool = False) -> tuple[dict[str, Any], 
     if document.get("schema_version") != "worldline.training/0.1":
         raise ValueError("unsupported training schema")
     config = dict(document["trainer"])
-    for name in ("train_file", "validation_file", "output_dir", "jobs_dir"):
+    if config.get("timeout_sec") is not None and (
+        type(config["timeout_sec"]) not in {int, float} or not 0 < config["timeout_sec"] <= 7 * 24 * 3600
+    ):
+        raise ValueError("trainer timeout must be in (0,604800] seconds")
+    for name in ("train_file", "validation_file", "output_dir", "jobs_dir", "working_dir"):
         if config.get(name):
             path = Path(config[name])
             config[name] = str((config_path.parent / path).resolve()) if not path.is_absolute() else str(path.resolve())
@@ -85,11 +91,19 @@ def train(config_path: Path, *, dry_run: bool = False) -> tuple[dict[str, Any], 
     write_json(path, manifest)
     if dry_run:
         return manifest, path
+    process = None
     try:
         with (job_dir / "trainer.log").open("wb") as log:
-            completed = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=False)
-        manifest["exit_code"] = completed.returncode
-        manifest["status"] = "completed" if completed.returncode == 0 else "failed"
+            process = subprocess.Popen(
+                command,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                cwd=config.get("working_dir", config_path.parent),
+            )
+            code = process.wait(timeout=config.get("timeout_sec"))
+        manifest["exit_code"] = code
+        manifest["status"] = "completed" if code == 0 else "failed"
     except BaseException as error:
         manifest.update(
             status="interrupted" if isinstance(error, KeyboardInterrupt) else "failed",
@@ -97,6 +111,20 @@ def train(config_path: Path, *, dry_run: bool = False) -> tuple[dict[str, Any], 
         )
         raise
     finally:
+        if process is not None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=2)
         manifest["finished_at_ns"] = time.time_ns()
         write_json(path, manifest)
     return manifest, path

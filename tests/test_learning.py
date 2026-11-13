@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -62,10 +62,22 @@ class LearningTest(unittest.TestCase):
                 self.assertEqual(len(manifest["inputs"][0]["sha256"]), 64)
                 self.assertTrue(path.is_file())
                 run.assert_not_called()
-            with patch("worldline.learning.launch.subprocess.run", return_value=subprocess.CompletedProcess([], 7)):
-                manifest, path = train(config)
-                self.assertEqual(manifest["status"], "failed")
-                self.assertEqual(json.loads(path.read_text())["exit_code"], 7)
+            config.write_text(
+                config.read_text().replace(
+                    '["trainer", "{train_file}"]',
+                    json.dumps(
+                        [
+                            sys.executable,
+                            "-c",
+                            "from pathlib import Path; Path('cwd-proof').write_text('ok'); raise SystemExit(7)",
+                        ]
+                    ),
+                )
+            )
+            manifest, path = train(config)
+            self.assertEqual(manifest["status"], "failed")
+            self.assertEqual(json.loads(path.read_text())["exit_code"], 7)
+            self.assertEqual((root / "cwd-proof").read_text(), "ok")
 
     def test_rejects_held_out_and_empty_training_data(self):
         with tempfile.TemporaryDirectory() as temp:

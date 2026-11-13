@@ -56,7 +56,16 @@ class Episode:
 
 def _load_object(path: Path) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        with path.open("rb") as stream:
+            import os
+
+            size = os.fstat(stream.fileno()).st_size
+            if size > 64 * 1024 * 1024:
+                raise ValueError("trajectory/metadata exceeds 64 MiB object budget")
+            raw = stream.read(size + 1)
+            if len(raw) > size:
+                raise ValueError("trajectory changed during bounded read")
+        value = json.loads(raw)
     except (OSError, ValueError):
         return {}
     return value if isinstance(value, dict) else {}
@@ -71,6 +80,26 @@ def discover_results(inputs: Sequence[Path]) -> list[Path]:
         elif path.is_dir():
             found.update(path.rglob("result.normalized.json"))
     return sorted(found)
+
+
+def iter_result_paths(inputs):
+    """Deterministic directory traversal with disk-backed path deduplication."""
+    import os
+    from worldline.data_index import DiskIndex
+
+    with DiskIndex() as seen:
+        for raw in inputs:
+            path = raw.resolve()
+            if path.is_file() and path.name == "result.normalized.json":
+                if seen.add(str(path)):
+                    yield path
+            elif path.is_dir():
+                for folder, directories, files in os.walk(path):
+                    directories.sort()
+                    if "result.normalized.json" in files:
+                        result = Path(folder) / "result.normalized.json"
+                        if seen.add(str(result)):
+                            yield result
 
 
 def _trajectory_path(result: Mapping[str, Any]) -> Path | None:
@@ -109,8 +138,17 @@ def iter_episodes(
             "conflicting_split": 0,
         }
     )
-    seen = set()
-    for result_path in discover_results(inputs):
+    from worldline.data_index import DiskIndex
+
+    seen = DiskIndex()
+    try:
+        yield from _indexed_episodes(inputs, stats, seen, media_store, allow_unspecified_split)
+    finally:
+        seen.close()
+
+
+def _indexed_episodes(inputs, stats, seen, media_store, allow_unspecified_split):
+    for result_path in iter_result_paths(inputs):
         stats["results"] += 1
         result = _load_object(result_path)
         if result.get("counted") is False:
@@ -326,6 +364,7 @@ def export_datasets(
     media_mode: str = "inline",
     media_root: Path | None = None,
     allow_unspecified_split=False,
+    quality_policy=None,
 ) -> dict[str, dict[str, Any]]:
     """Read each trajectory once and publish requested views after completion."""
     if not outputs or any(name not in {"sft", "rl", "preference"} for name in outputs):
@@ -340,6 +379,11 @@ def export_datasets(
         raise ValueError("reference dataset outputs must be inside their media_root")
     counts = {name: 0 for name in outputs}
     stats: dict[str, int] = {}
+    from worldline.learning.quality import QualityPolicy
+    from worldline.data_index import DiskIndex
+
+    quality = quality_policy or QualityPolicy()
+    quotas = DiskIndex()
     streams, temporary = {}, {}
     with tempfile.TemporaryDirectory(prefix="worldline-pairs-") as directory:
         spool = PreferenceSpool(Path(directory) / "pairs.sqlite") if "preference" in outputs else None
@@ -360,6 +404,15 @@ def export_datasets(
             for episode in iter_episodes(
                 inputs, stats, media_store=store, allow_unspecified_split=allow_unspecified_split
             ):
+                if not quality.accepts(episode):
+                    stats["quality_rejected"] = stats.get("quality_rejected", 0) + 1
+                    continue
+                key = (episode.task_id, episode.task_version, episode.split)
+                admitted = quotas.get(key, 0)
+                if quality.max_samples_per_task is not None and admitted >= quality.max_samples_per_task:
+                    stats["task_capped"] = stats.get("task_capped", 0) + 1
+                    continue
+                quotas.set(key, admitted + 1)
                 if "sft" in outputs:
                     for record in _sft([episode], include_failures):
                         append("sft", record)
@@ -374,6 +427,7 @@ def export_datasets(
                 stream.close()
                 temporary[name].replace(outputs[name])
         finally:
+            quotas.close()
             if spool is not None:
                 spool.close()
             for stream in streams.values():
@@ -392,6 +446,7 @@ def export_datasets(
                 "include_failures": include_failures,
                 "max_pairs_per_task": max_pairs_per_task,
                 "allow_unspecified_split": allow_unspecified_split,
+                "quality_policy": quality.configuration(),
             },
             "pipeline": "single-pass-streaming-with-disk-pairing",
             "media": {
@@ -416,6 +471,7 @@ def export_dataset(
     media_mode: str = "inline",
     media_root: Path | None = None,
     allow_unspecified_split=False,
+    quality_policy=None,
 ) -> dict[str, Any]:
     return export_datasets(
         inputs,
@@ -425,6 +481,7 @@ def export_dataset(
         media_mode=media_mode,
         media_root=media_root,
         allow_unspecified_split=allow_unspecified_split,
+        quality_policy=quality_policy,
     )[format]
 
 
@@ -500,6 +557,18 @@ def split_dataset(
     test_ratio: float = 0.1,
     seed: str = "worldline-v1",
 ) -> dict[str, Any]:
+    from worldline.data_index import DiskIndex
+    from worldline.storage import staged_directory
+
+    with DiskIndex() as tasks, DiskIndex() as declarations, staged_directory(output_dir) as stage:
+        return _split_indexed_dataset(
+            input_path, stage, train_ratio, validation_ratio, test_ratio, seed, tasks, declarations
+        )
+
+
+def _split_indexed_dataset(
+    input_path, output_dir, train_ratio, validation_ratio, test_ratio, seed, tasks, declarations
+):
     ratios = (train_ratio, validation_ratio, test_ratio)
     if any(not math.isfinite(ratio) or ratio < 0 for ratio in ratios) or abs(sum(ratios) - 1.0) > 1e-9:
         raise ValueError("train, validation, and test ratios must be non-negative and sum to 1")
@@ -507,21 +576,19 @@ def split_dataset(
     output_dir = output_dir.resolve()
     names = ("train", "validation", "test")
     counts = {name: 0 for name in names}
-    tasks: dict[str, str] = {}
-    declarations: dict[str, str] = {}
     for line_number, record in _jsonl(input_path):
         if not _record_task_id(record):
             raise ValueError(f"{input_path}:{line_number}: record has no task_id")
         group = _record_group(record)
         declared = _record_split(record)
         if declared in names:
-            if group in declarations and declarations[group] != declared:
+            if group in declarations and declarations.get(group) != declared:
                 raise ValueError(f"conflicting declared splits for group {group!r}")
-            declarations[group] = declared
+            declarations.set(group, declared)
         elif declared in {"evaluation", "held_out"}:
-            if group in declarations and declarations[group] != "test":
+            if group in declarations and declarations.get(group) != "test":
                 raise ValueError(f"conflicting declared splits for group {group!r}")
-            declarations[group] = "test"
+            declarations.set(group, "test")
     output_dir.mkdir(parents=True, exist_ok=True)
     streams = {name: (output_dir / f"{name}.jsonl").open("w", encoding="utf-8") for name in names}
     try:
@@ -536,7 +603,9 @@ def split_dataset(
                 "train" if bucket < train_ratio else "validation" if bucket < train_ratio + validation_ratio else "test"
             )
             split = declarations.get(group, split)
-            tasks[task_id] = split
+            if task_id in tasks and tasks.get(task_id) != split:
+                raise ValueError(f"task {task_id!r} would overlap splits; use a consistent split_group")
+            tasks.set(task_id, split)
             original = _record_split(record)
             record["split"] = split
             if isinstance(record.get("metadata"), dict):
@@ -552,7 +621,7 @@ def split_dataset(
         "seed": seed,
         "ratios": dict(zip(names, ratios, strict=True)),
         "records": counts,
-        "tasks": {name: sum(split == name for split in tasks.values()) for name in names},
+        "tasks": {name: tasks.count_value(name) for name in names},
     }
     source_manifest = _load_object(input_path.with_suffix(input_path.suffix + ".manifest.json"))
     media = source_manifest.get("media") or {}
@@ -564,15 +633,19 @@ def split_dataset(
 
 
 def validate_datasets(paths: Sequence[Path], *, max_record_bytes=64 * 1024 * 1024) -> dict[str, Any]:
-    errors: list[str] = []
-    seen_ids: dict[str, str] = {}
-    tasks_by_file: dict[str, set[str]] = {}
-    groups_by_file: dict[str, set[str]] = {}
+    from worldline.data_index import ValidationIndex
+
+    with ValidationIndex() as index:
+        return _validate_indexed_datasets(paths, max_record_bytes, index)
+
+
+def _validate_indexed_datasets(paths, max_record_bytes, seen_ids):
+    from worldline.data_index import ErrorLog
+
+    errors = ErrorLog()
     record_counts: dict[str, int] = {}
     for raw_path in paths:
         path = raw_path.resolve()
-        tasks: set[str] = set()
-        groups: set[str] = set()
         count = 0
         try:
             for line_number, record in _jsonl(path, max_record_bytes=max_record_bytes):
@@ -584,45 +657,37 @@ def validate_datasets(paths: Sequence[Path], *, max_record_bytes=64 * 1024 * 102
                     if previous:
                         errors.append(f"duplicate id {record_id!r}: {previous} and {path}:{line_number}")
                     else:
-                        seen_ids[record_id] = f"{path}:{line_number}"
+                        seen_ids.add(record_id, f"{path}:{line_number}")
                 task_id = _record_task_id(record)
                 if not task_id:
                     errors.append(f"{path}:{line_number}: missing task_id")
                 else:
-                    tasks.add(task_id)
+                    seen_ids.member("tasks", task_id, str(path))
                 group = _record_group(record)
                 if group:
-                    groups.add(group)
+                    seen_ids.member("groups", group, str(path))
                 for field in ("messages", "chosen", "rejected"):
                     if field in record and not isinstance(record[field], (list, tuple)):
                         errors.append(f"{path}:{line_number}: {field} must be an array")
         except (OSError, ValueError, json.JSONDecodeError) as error:
             errors.append(str(error))
         key = str(path)
-        tasks_by_file[key] = tasks
-        groups_by_file[key] = groups
         record_counts[key] = count
 
-    overlaps: list[dict[str, Any]] = []
-    for (left, left_tasks), (right, right_tasks) in itertools.combinations(tasks_by_file.items(), 2):
-        shared = sorted(left_tasks & right_tasks)
-        if shared:
-            overlaps.append({"left": left, "right": right, "tasks": shared})
+    overlaps = seen_ids.overlaps("tasks")
     if overlaps:
         errors.append(f"task overlap exists between {len(overlaps)} file pairs")
-    group_overlaps = []
-    for (left, left_groups), (right, right_groups) in itertools.combinations(groups_by_file.items(), 2):
-        shared = sorted(left_groups & right_groups)
-        if shared:
-            group_overlaps.append({"left": left, "right": right, "groups": shared})
+    group_overlaps = seen_ids.overlaps("groups")
     if group_overlaps:
         errors.append(f"split group overlap exists between {len(group_overlaps)} file pairs")
+    unique_ids = len(seen_ids)
     return {
         "schema_version": "worldline.validation/0.1",
         "valid": not errors,
         "records": record_counts,
-        "unique_ids": len(seen_ids),
+        "unique_ids": unique_ids,
         "errors": errors,
+        "errors_truncated_count": errors.dropped,
         "overlaps": overlaps,
         "group_overlaps": group_overlaps,
     }

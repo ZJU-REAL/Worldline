@@ -14,6 +14,7 @@ from pathlib import Path
 
 from worldline import __version__
 from worldline.runtime.resources import ResourcePool
+from worldline.runtime.shared_resources import HostResourcePool
 from worldline.runtime.state import DurableQueue
 from worldline.runtime.queue import snapshot_batch, validate_batch_id
 from worldline.plugins import get_environment_plugin
@@ -34,6 +35,9 @@ def evaluate_many_native(
     retry_delay_sec=0.5,
     cpu_budget=None,
     gpu_devices=(),
+    resource_scope="host",
+    resource_dir=None,
+    coordinator_url=None,
     **options,
 ):
     if type(max_workers) is not int or max_workers < 1:
@@ -55,6 +59,18 @@ def evaluate_many_native(
     configuration = {
         key: options.get(key) for key in ("agent_name", "model", "harness_version", "dry_run", "agent_config")
     }
+    from worldline.agents.config import factory_configuration
+
+    configuration["agent_factory"] = factory_configuration(options.get("agent_factory"))
+    occurrences, logical_jobs = {}, []
+    for path in tasks:
+        try:
+            task_id = load_native_task(path).task.id
+        except (OSError, ValueError, KeyError):
+            task_id = str(path)
+        count = occurrences.get(task_id, 0)
+        occurrences[task_id] = count + 1
+        logical_jobs.append(f"{batch_id}:{task_id}:{count}")
     signature = hashlib.sha256(
         json.dumps(
             {
@@ -64,6 +80,9 @@ def evaluate_many_native(
                 "worldline_version": __version__,
                 "cpu_budget": cpu_budget,
                 "gpu_devices": tuple(gpu_devices),
+                "resource_scope": resource_scope,
+                "resource_dir": str(resource_dir) if resource_dir else None,
+                "coordinator_url": coordinator_url,
             },
             sort_keys=True,
         ).encode()
@@ -96,7 +115,13 @@ def evaluate_many_native(
                     )
             db.execute("UPDATE jobs SET status='pending' WHERE status IN ('running', 'blocked')")
         state.reset_stop()
-        resources = ResourcePool(cpu_budget if cpu_budget is not None else os.cpu_count() or 1, gpu_devices)
+        capacity = cpu_budget if cpu_budget is not None else os.cpu_count() or 1
+        if resource_scope == "host":
+            resources = HostResourcePool(capacity, gpu_devices, directory=resource_dir)
+        elif resource_scope == "process":
+            resources = ResourcePool(capacity, gpu_devices)
+        else:
+            raise ValueError("resource_scope must be host or process")
         if resources.capacity < 1:
             raise ValueError("cpu_budget must be positive")
         provider_blocked = threading.Event()
@@ -117,9 +142,39 @@ def evaluate_many_native(
                     save(ordinal, row, "blocked")
                     continue
                 cpus, device, leased = 0, None, False
+                remote = None
+                remote_granted = False
                 try:
                     definition = load_native_task(path)
                     plugin = get_environment_plugin(definition.task.environment)
+                    if coordinator_url and not options.get("dry_run"):
+                        from worldline.runtime.coordinator import RemoteLease
+
+                        remote_signature = hashlib.sha256(
+                            json.dumps(
+                                {
+                                    "task_version": definition.task.version,
+                                    "config": configuration,
+                                    "worldline_version": __version__,
+                                },
+                                sort_keys=True,
+                            ).encode()
+                        ).hexdigest()
+                        remote = RemoteLease(coordinator_url, logical_jobs[ordinal], remote_signature)
+                        remote_state = remote.claim()
+                        remote_granted = remote_state["granted"]
+                        if not remote_state["granted"]:
+                            row.update(
+                                status="remote_completed"
+                                if remote_state["status"] == "completed"
+                                else "orphaned"
+                                if remote_state["status"] == "orphaned"
+                                else "blocked",
+                                remote_result=remote_state.get("result"),
+                                error="job is owned/finalized by another runner; collect its original artifacts",
+                            )
+                            save(ordinal, row, row["status"])
+                            continue
                     if plugin.preflight and not options.get("dry_run"):
                         key = (plugin.name, plugin.version)
                         with mutex:
@@ -159,7 +214,17 @@ def evaluate_many_native(
                     requested = {} if options.get("dry_run") else definition.task.metadata.get("resources", {})
                     cpus = max(1, math.ceil(requested.get("min_cpus", 1)))
                     gpu = bool(requested.get("gpu_required", False))
-                    device = resources.acquire(cpus, gpu)
+
+                    def stopped():
+                        with mutex:
+                            value = db.execute("SELECT value FROM control WHERE key='stop_requested'").fetchone()
+                        return (
+                            provider_blocked.is_set()
+                            or bool(value and value[0] == "1")
+                            or bool(remote and remote.error)
+                        )
+
+                    device = resources.acquire(cpus, gpu, cancel=stopped)
                     leased = True
                     environment = (
                         {"CUDA_VISIBLE_DEVICES": str(device), "WORLDLINE_GPU_DEVICE": str(device)}
@@ -187,6 +252,7 @@ def evaluate_many_native(
                             logical_trial_id=f"{batch_id}:{ordinal}",
                             attempt=len(row["attempts"]) + 1,
                             worker_env=environment,
+                            cancel_check=(lambda: bool(remote.error)) if remote else None,
                             **options,
                         )
                         row.update(run_id=record.run_id, run_dir=str(run_dir), status=record.status)
@@ -207,6 +273,8 @@ def evaluate_many_native(
                                 old.update(counted=False, superseded_by=record.run_id)
                                 write_json(previous_path, old)
                         save(ordinal, row)
+                        if remote and remote.error:
+                            break
                         if not (
                             result.get("outcome") == "infra_error"
                             and result.get("retryable")
@@ -216,9 +284,29 @@ def evaluate_many_native(
                             break
                         prior = str(run_dir)
                         time.sleep(retry_delay_sec)
+                except InterruptedError:
+                    row.update(status="pending")
                 except Exception as error:
                     row.update(status="error", error=f"{type(error).__name__}: {error}")
                 finally:
+                    if remote:
+                        try:
+                            if remote_granted and row.get("status") != "pending":
+                                remote.complete(
+                                    {
+                                        "run_id": row.get("run_id"),
+                                        "run_dir": row.get("run_dir"),
+                                        "result_sha256": row.get("result_sha256"),
+                                        "status": row["status"],
+                                    }
+                                )
+                        except Exception as error:
+                            row.update(
+                                status="orphaned",
+                                error=f"distributed completion could not be confirmed: {type(error).__name__}",
+                            )
+                        finally:
+                            remote.close()
                     if leased:
                         resources.release(cpus, device)
                     save(ordinal, row, row.get("status", "error"))
@@ -250,8 +338,9 @@ def evaluate_many_native(
             "runs": rows,
             "resume": resume,
             "max_infra_retries": max_infra_retries,
-            "resources": {"cpu_budget": resources.capacity, "gpu_devices": list(gpu_devices)},
+            "resources": {"cpu_budget": resources.capacity, "gpu_devices": list(gpu_devices), "scope": resource_scope},
             "state": str(directory / "state.sqlite"),
+            "coordinator_url": coordinator_url,
         }
         write_json(directory / "manifest.json", manifest)
         return manifest

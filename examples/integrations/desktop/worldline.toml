@@ -1,0 +1,23 @@
+schema_version = "worldline.task/0.1"
+[task]
+id = "cua/osworld-session"
+domain = "cua"
+environment = "cua.desktop"
+split = "test"
+seed = 0
+[environment]
+source_revision = "REPLACE_WITH_PINNED_OSWORLD_REVISION"
+task_config_sha256 = "REPLACE_WITH_TASK_CONFIG_SHA256"
+[environment.provider]
+command = ["/path/to/osworld-python", "-m", "worldline.adapters.osworld_controller", "--request", "{request_file}", "--ready", "{ready_file}", "--task-config", "/path/to/reviewed-task.json", "--provider", "docker", "--snapshot", "/path/to/approved-snapshot"]
+startup_timeout_sec = 120
+[evaluation]
+timeout_sec = 1800
+max_actions = 100
+max_turns = 100
+reset_budget = 0
+[metadata]
+purpose = "integration_template"
+split_group = "REPLACE_WITH_SOURCE_TASK_GROUP"
+[metadata.resources]
+min_cpus = 4

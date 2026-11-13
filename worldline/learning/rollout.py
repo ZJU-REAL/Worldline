@@ -8,19 +8,20 @@ from pathlib import Path
 import os
 import math
 from worldline.runtime.resources import ResourcePool
+from worldline.runtime.shared_resources import HostResourcePool
 
 from worldline.runtime.interactive import InteractiveSession
 from worldline.tasks import load_native_task
 
 _RESOURCE_PID = os.getpid()
-_DEFAULT_RESOURCES = ResourcePool(os.cpu_count() or 1, ())
+_DEFAULT_RESOURCES = None
 
 
 def default_resources():
     global _RESOURCE_PID, _DEFAULT_RESOURCES
-    if _RESOURCE_PID != os.getpid():
+    if _RESOURCE_PID != os.getpid() or _DEFAULT_RESOURCES is None:
         _RESOURCE_PID = os.getpid()
-        _DEFAULT_RESOURCES = ResourcePool(os.cpu_count() or 1, ())
+        _DEFAULT_RESOURCES = HostResourcePool(os.cpu_count() or 1, ())
     return _DEFAULT_RESOURCES
 
 
@@ -61,9 +62,26 @@ class NativeTrainingSession(InteractiveSession):
 
     def start(self):
         with self.lock:
-            if self.environment is not None or self.result is not None:
+            if self.environment is not None or self.result is not None or getattr(self, "_admitting", False):
                 raise RuntimeError("session was already started or closed")
-            self.device = self.resources.acquire(self.cpus, self.gpu_required)
+            self._admitting = True
+        try:
+            extra = {"owner": self.run_id} if isinstance(self.resources, HostResourcePool) else {}
+            device = self.resources.acquire(
+                self.cpus,
+                self.gpu_required,
+                cancel=lambda: self._closed,
+                timeout=self.definition.task.metadata.get("admission_timeout_sec", 30),
+                **extra,
+            )
+        except BaseException as error:
+            self.abort(error)
+            raise
+        with self.lock:
+            if self._closed:
+                self.resources.release(self.cpus, device, **extra)
+                raise RuntimeError("session was closed during admission")
+            self.device = device
             self.leased = True
             if self.device is not None:
                 self.worker_env = {
@@ -78,7 +96,8 @@ class NativeTrainingSession(InteractiveSession):
             return super()._publish(*args, **kwargs)
         finally:
             if self.leased and (self.environment is None or self.environment.process.poll() is not None):
-                self.resources.release(self.cpus, self.device)
+                extra = {"owner": self.run_id} if isinstance(self.resources, HostResourcePool) else {}
+                self.resources.release(self.cpus, self.device, **extra)
                 self.leased = False
 
     def training_outcome(self) -> TrainingOutcome:

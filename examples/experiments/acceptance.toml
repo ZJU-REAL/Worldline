@@ -1,0 +1,38 @@
+schema_version = "worldline.experiment/0.1"
+output_dir = "../../runs/acceptance-05"
+[[phase]]
+id = "rua-teacher"
+backend = "native"
+tasks = ["../rua/reach-train", "../rua/reach-visual-cpu"]
+max_workers = 2
+cpu_budget = 4
+distill = true
+handoff = ["llama-factory", "verl"]
+student_model = "REPLACE_WITH_LOCAL_STUDENT_MODEL"
+template = "qwen2_vl"
+[phase.model]
+model = "REPLACE_WITH_TEACHER_MODEL"
+base_url = "http://localhost:8000/v1"
+api_key_env = "WORLDLINE_API_KEY"
+model_revision = "REPLACE_WITH_VERIFIED_SERVING_REVISION"
+max_context_images = 4
+max_context_bytes = 8388608
+max_output_tokens = 2048
+max_retries = 2
+endpoint_concurrency = 4
+endpoint_rpm = 0
+temperature = 0.0
+[phase.quality]
+max_tool_error_fraction = 0.1
+max_samples_per_task = 100
+[[phase]]
+id = "cua-evaluation"
+backend = "native"
+tasks = ["../cua/form-test"]
+max_workers = 1
+[phase.model]
+model = "REPLACE_WITH_TEACHER_MODEL"
+base_url = "http://localhost:8000/v1"
+api_key_env = "WORLDLINE_API_KEY"
+endpoint_concurrency = 4
+endpoint_rpm = 0

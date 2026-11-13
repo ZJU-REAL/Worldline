@@ -17,6 +17,7 @@ class EnvironmentPlugin:
     factory: Callable[[Task, Mapping[str, Any]], Environment]
     restartable: bool = True
     preflight: Callable[[], None] | None = None
+    contract_version: str = "worldline.environment/0.1"
 
 
 def environment_plugins() -> dict[str, EnvironmentPlugin]:
@@ -32,6 +33,15 @@ def environment_plugins() -> dict[str, EnvironmentPlugin]:
         if plugin.name in registered:
             raise ValueError(f"duplicate environment plugin: {plugin.name}")
         registered[plugin.name] = plugin
+    for plugin in registered.values():
+        if (
+            plugin.contract_version != "worldline.environment/0.1"
+            or not plugin.version
+            or not plugin.domain
+            or type(plugin.restartable) is not bool
+            or not callable(plugin.factory)
+        ):
+            raise ValueError(f"incompatible environment plugin contract: {plugin.name}")
     return registered
 
 

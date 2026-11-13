@@ -26,3 +26,15 @@ def comparison_configuration(runtime):
     # Model names are reported separately so models using the same harness and
     # budgets can still be compared and paired on a common configuration.
     return {**runtime, "settings": {key: value for key, value in runtime["settings"].items() if key != "model"}}
+
+
+def factory_configuration(factory):
+    candidate = getattr(factory, "func", factory)
+    try:
+        source = inspect.getsourcefile(candidate)
+    except TypeError:
+        source = None
+    return {
+        "name": f"{getattr(candidate, '__module__', '')}.{getattr(candidate, '__qualname__', type(candidate).__qualname__)}",
+        "code_sha256": file_sha256(Path(source)) if source and Path(source).is_file() else None,
+    }

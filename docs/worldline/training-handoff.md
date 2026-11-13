@@ -32,10 +32,11 @@ worldline training-handoff datasets/my-experiment/splits/sft/train.jsonl \
 
 ```bash
 cd /path/to/lf-package
-llamafactory-cli train llama_factory_sft.yaml
+python adapters/check_package.py . --framework llama-factory --model /local/model --template qwen2_vl --expected-version YOUR_LF_VERSION
+python adapters/llama_factory_entry.py llama_factory_sft.yaml
 ```
 
-调整模型、template、batch size、长度与训练参数。包可以整体移动；从包根目录运行，以便相对图片路径正确解析。若函数调用同时带 prose，函数监督仅转换 name/arguments，原 prose 保留在原始 Worldline 轨迹，并在 manifest 统计省略次数。末尾工具输入可从 LF 监督视图裁去，对应裁剪记录在样本 metadata；原轨迹保持完整。
+调整模型、template、batch size、长度与训练参数。包可以整体移动；从包根目录运行，以便相对图片路径正确解析。0.5 默认 preserve 同时出现的 prose 与 function calls：包内 entry 复制原生模板并用保真 formatter 将两者放在正确的 assistant slots 内；配置中的 `worldline__` 别名防止直接绕过 entry 静默丢文字。`--tool-prose-policy reject/omit` 是显式选择，omit 数量写入 manifest，严格 loader-check 会拒绝。末尾工具输入可从 LF 监督视图裁去，对应裁剪记录在样本 metadata；canonical 原消息保存在 `data/*-worldline.jsonl`。
 
 ## verl
 
@@ -47,7 +48,7 @@ worldline training-handoff datasets/my-experiment/splits/sft/train.jsonl \
 
 输出 `data/train.parquet` 保存多轮 messages、tools、图像 bytes 和 metadata；`adapters/verl_sft_dataset.py` 是训练环境中导入的薄 MultiTurnSFTDataset 适配器，用于恢复 JSON 编码的对话与异构工具 Schema。将 `verl_data.yaml` 合入所安装版本的 SFT 配置，提供 tokenizer、模型与图像 processor。也可直接用 `WorldlineSFTDataset` 作为该版本支持的 custom dataset class。
 
-`*-rl.parquet` 是另一种数据：只含初始上下文、初始图像与任务身份，不包含教师动作/后续观察作为 prompt。`reward_model.ground_truth` 是任务身份，**不是可复制到新 rollout 的历史 reward**。在线 GRPO/PPO 还需要训练侧 AgentLoop 启动任务、执行新工具调用、请求独立 verifier；本版未将这些桥接器假装成可运行的默认 reward function。
+`*-rl.parquet` 是另一种数据：只含初始上下文、初始图像与任务身份，不包含教师动作/后续观察作为 prompt。`reward_model.ground_truth` 是任务身份，**不是可复制到新 rollout 的历史 reward**。在线 AgentLoop 可用 0.5 的 episode service 和可选 verl BaseTool，保持多轮环境生命周期并从可信 finish 通道取得新动作奖励；具体版本的 PPO/GRPO 作业仍由训练框架运行。
 
 该 RL 文件的任务集合来自输入 SFT 样本；它不是自动构建的完整 RL 课程。若课程需要覆盖教师失败任务，应独立从训练任务定义或全部验证过的 rollout 构建任务清单，避免成功样本筛选带来的偏差。
 
@@ -62,3 +63,5 @@ worldline training-handoff datasets/my-experiment/splits/sft/train.jsonl \
 0.4 交付支持 `--parquet-batch-mb`（默认 8）、`--max-record-mb`（默认 64）、`--max-episode-media-mb`（默认 64）。Parquet batch 按字节控制；单条大记录可占一个单独 row group，但不能超过 record budget。JSONL 在解析前执行单行预算。只影响训练格式，不改变原始评测证据。
 
 在线新动作评分接口见 [Live training](live-training.md)，有效 0 与不可评分结果必须区分。
+
+0.5 的实际 framework loader/collator 检查由包内 `adapters/check_package.py` 执行；指定安装版本和本地模型，检查真实 assistant supervision 与 multimodal inputs。权重更新和训练后复评分开，参见 [最终验收](acceptance.md)。大规模去重、split assignment、ID/group 校验使用磁盘索引；仍按明确单 episode/record 字节预算拒绝超大样本，不声称完全流式解码任意长度的一条 trajectory JSON。

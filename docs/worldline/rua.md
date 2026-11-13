@@ -43,7 +43,7 @@ worldline rollout examples/rua/reach-train \
   --base-url http://localhost:8000/v1
 ```
 
-API key 从环境变量读取，不写入配置、命令记录或轨迹。可用 `--api-key-env` 选择已有变量。本版同步 API 不自动重试；服务错误属于基础设施错误。模型看到动作 Schema、单位、坐标系、初始观测及每次实际反馈，`finish` 只结束尝试。
+API key 从环境变量读取，不写入配置、命令记录或轨迹。可用 `--api-key-env` 选择已有变量。暂时 API 错误在原上下文内受控 retry；永久认证/endpoint 错误阻止后续领取。0.5 的 I/O 子进程硬 deadline 覆盖 DNS/缓慢 body，支持上下文、输出 token、响应字节及共享 endpoint 限流。模型看到动作 Schema、单位、坐标系、初始观测及每次实际反馈，`finish` 只结束尝试。
 
 MuJoCo 默认提供关节、末端和目标的公开状态，声明 `privileged_state = true`。需要 RGB 时复制任务到自己的原生实验目录，把 `render` 改为 true；无 GPU Linux 可安装 OSMesa 并设置：
 
@@ -88,6 +88,7 @@ seed = 0
 socket_path = "/path/to/trusted/agent-independent-simulator.sock"
 image_root = "/path/to/trusted/simulator-artifacts"
 source_revision = "pinned-simulator-and-task-revision"
+session_manifest = "/path/to/fresh-session.json"
 
 [evaluation]
 timeout_sec = 1800
@@ -96,7 +97,7 @@ max_turns = 100
 reset_budget = 0
 ```
 
-`instruction.md` 与此会话任务保持一致，使用者负责固定任务、种子和环境版本并为每次 rollout 创建新会话。adapter 从可信图片根目录取图并校验 SHA256，仅转发公开观测；动作是 `{"actions": [[...], ...]}`，仍遵循源环境 limits/units。模型不能调用 `evaluate`，独立 worker 在结束后请求原生 success 判据。源协议不支持 reset，也不提供快照；Worldline 不伪装这些能力。外部 simulator 的创建与销毁归其拥有者。
+`instruction.md` 与会话任务保持一致，descriptor 核验任务、种子、版本及 session_id；每次 rollout 独占并消费新会话。adapter 从可信图片根目录取图并校验 SHA256 与字节预算；动作是 `{"actions": [[...], ...]}`，核对向量边界并遵循源环境 limits/units。模型不能调用 `evaluate`，独立 worker 在结束后请求原生 success 判据。borrowed 服务不自动重启；源协议未提供 reset/快照时保持能力关闭。需要框架创建/回收时用 `rua.managed` 与命令 provider，见 [环境供应](provisioning.md)。
 
 ## 训练与训练后复评
 
@@ -107,7 +108,7 @@ worldline train examples/rua/sft.toml
 
 示例模型是可替换的公开小模型；实际运行会下载模型并更新权重。先用 `--dry-run` 检查输入和 manifest。训练器在独立进程运行，保留工具消息，以 tokenizer 的 chat template 构造文本监督，只对 assistant tokens 计算 loss。训练轨迹中被截断后没有 assistant tokens、空数据和不兼容 chat template 会报错。
 
-本版内置后端是文本 SFT。含图像的轨迹会明确报错，需接入支持对应 VLM processor 的外部训练器；不会把图片伪装成文字监督。偏好/RL JSONL 已可导出，但内置后端尚不包含 DPO、在线 GRPO 或 verl 环境桥。
+内置后端是文本 SFT。含图像的轨迹会明确报错，需使用支持对应 VLM processor 的独立 LF/verl 等训练器；不会把图片伪装成文字监督。偏好/RL JSONL 已可导出；0.5 提供外部 sampler/episode service/verl tool 生命周期桥，但不在环境中实现 DPO、PPO 或 GRPO 算法。
 
 外部训练配置示例：
 

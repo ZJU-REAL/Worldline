@@ -46,7 +46,12 @@ class SocketAdapterTest(unittest.TestCase):
             try:
                 adapter = RUASocketEnvironment(
                     Task("x", "reach", "rua.socket", "1"),
-                    {"socket_path": str(root / "sim.sock"), "image_root": str(root), "source_revision": "fixed"},
+                    {
+                        "socket_path": str(root / "sim.sock"),
+                        "image_root": str(root),
+                        "source_revision": "fixed",
+                        "allow_unverified_session": True,
+                    },
                 )
                 self.assertNotIn("private_state_path", adapter.initial)
                 self.assertNotIn("path", adapter.initial["images"][0])
@@ -60,6 +65,8 @@ class SocketAdapterTest(unittest.TestCase):
                 with self.assertRaisesRegex(EnvironmentError, "hash mismatch"):
                     adapter.observe()
             finally:
+                if "adapter" in locals():
+                    adapter.close()
                 server.shutdown()
                 server.server_close()
                 thread.join()

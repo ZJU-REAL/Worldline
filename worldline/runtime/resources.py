@@ -16,16 +16,32 @@ class ResourcePool:
         self.gpu_capacity = len(self.devices)
         self.condition = threading.Condition()
 
-    def acquire(self, cpus, gpu):
-        if cpus > self.capacity or gpu and not self.gpu_capacity:
+    def acquire(self, cpus, gpu, *, cancel=None, timeout=None):
+        import time
+
+        if type(cpus) is not int or cpus < 1 or cpus > self.capacity or gpu and not self.gpu_capacity:
             raise ValueError("task resources exceed configured CPU/GPU capacity")
+        deadline = None if timeout is None else time.monotonic() + timeout
         with self.condition:
-            self.condition.wait_for(lambda: self.available >= cpus and (not gpu or self.devices))
+            while self.available < cpus or gpu and not self.devices:
+                if cancel and cancel():
+                    raise InterruptedError("resource admission cancelled")
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError("resource admission timed out")
+                self.condition.wait(timeout=0.05)
             self.available -= cpus
             return self.devices.pop(0) if gpu else None
 
     def release(self, cpus, device):
         with self.condition:
+            if (
+                type(cpus) is not int
+                or cpus < 1
+                or self.available + cpus > self.capacity
+                or device is not None
+                and device in self.devices
+            ):
+                raise ValueError("invalid or duplicate resource release")
             self.available += cpus
             if device is not None:
                 self.devices.append(device)

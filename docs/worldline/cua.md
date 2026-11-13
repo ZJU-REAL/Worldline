@@ -1,6 +1,6 @@
 # CUA：BrowserGym 接入
 
-CUA 使用与 RUA 相同的 Task、独立 worker、工具 Agent、可信结果、媒体存储、批次队列和训练交付。本版接入实际 BrowserGym/Chromium，覆盖浏览器方向；桌面 VM/OSWorld 仍需单独的适配器。
+CUA 使用与 RUA 相同的 Task、独立 worker、工具 Agent、可信结果、媒体存储、批次队列和训练交付。BrowserGym/Chromium 覆盖浏览器方向；0.5 增加 `cua.desktop` 与独立 OSWorld controller provider，配置见 [环境供应](provisioning.md)。桌面线协议已有自动检查，真实 VM 的最终验收由对应部署执行。
 
 ## 安装与本地检验
 

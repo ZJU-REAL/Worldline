@@ -1,0 +1,9 @@
+cpus = 4
+gpu_devices = []
+max_sessions = 4
+runs_dir = "../../runs/live-training"
+[tasks]
+reach = "../rua/reach-train"
+[session]
+model = "REPLACE_WITH_POLICY_MODEL_REVISION"
+harness_version = "external-agent-loop/0.1"

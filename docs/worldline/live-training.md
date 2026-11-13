@@ -48,10 +48,18 @@ restore_budget = 2
 
 在可信 controller 中使用 `session.checkpoint()` 和 `session.restore(checkpoint)`。默认恢复预算为 0；只允许该 session 签发且未修改的 checkpoint，校验 Task/环境版本。动作数、累计仿真步数和墙钟不会回退。恢复在轨迹中留下事件和明确的观察提示；模型公开工具不包含这些管理接口。
 
-这是单 worker 的受控回溯，尚不是独立并行 fork。其他环境必须实现自己的 `CheckpointEnvironment`，不能把网页 reload、reset 或动作 replay 当完整状态恢复。BrowserGym 和现有 RUA socket 没有声明该能力。
+restore 是单 worker 的受控回溯；0.5 的独立 fork 另建 worker，并要求环境实现 fork_restore。其他环境必须实现自己的 `CheckpointEnvironment`，不能把网页 reload、reset 或动作 replay 当完整状态恢复。BrowserGym 和现有 RUA socket 没有声明快照能力。
 
 ## 与 verl 对接
 
 离线 SFT 使用 [训练交付指南](training-handoff.md) 的 Parquet 和薄数据 adapter。在线训练可在你所用版本的 AgentLoop/sampler 内调用上述 session 接口，保留模型侧 response mask/logprob，并在 rollout 完成后请求最终 reward。
 
 需按实际版本接入生命周期。本轮核对的 verl `ToolAgentLoop` 对 `BaseTool` 的 create/execute/release 可发生在单次工具调用内；直接在每次 create 启动新环境、每次 release 关闭环境会丢失多轮状态。因此本版不提供这种错误的“一次工具即一个 episode” shim，也不声称已经验证完整 GPU PPO/GRPO 作业。
+
+## 0.5 episode service 与独立 fork
+
+`EpisodeRegistry`、`learning.service` 和可选 `WorldlineEnvironmentTool` 补齐训练侧的生命周期入口：可信 sampler 先 begin，per-tool create 绑定稳定 episode_id，release 只清理短 handle，最终奖励由可信 finish 取得。重复 request_id 读取持久响应；未知 intent 不再执行。响应缓存保留媒体引用并有界，完成会话从活动内存移出。
+
+`session.fork(checkpoint)` 创建独立 worker，继承原墙钟、动作/turn/reset、调用 ID 和累计仿真计数。任务显式声明 `fork_budget`，quota 在整棵树共享；原 source checkpoint 不被修改。每条子轨迹记录 parent run/checkpoint 与恢复后的真实观察，split/group 跟随原任务。该能力当前由 MuJoCo fixture 实现；其他环境需自行实现 fork_restore。
+
+执行和最终 GPU/trainer 验收见 [验收入口](acceptance.md)。这里的 BaseTool 适配器记录结构化 action view，外部框架保留完整 policy token/logprob/mask；需要完整教师消息时直接通过 sampler 的 advance 传原 assistant message。

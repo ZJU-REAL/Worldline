@@ -18,8 +18,10 @@ from urllib.parse import urlparse
 
 from worldline.contracts import Sandbox, Task
 from worldline.runtime.tools import execute_tool
-from worldline.media import model_context, MessageHistory
+from worldline.media import model_context, MessageHistory, hydrate_media
 from worldline.errors import AgentError, BudgetExceeded, InvalidAction, ModelAPIError
+from worldline.agents.endpoint import EndpointLimiter
+from worldline.agents.transport import http_completion
 
 
 def tools_for(spec: dict) -> list[dict]:
@@ -90,6 +92,17 @@ class OpenAICompatibleAgent:
         max_retries: int = 2,
         retry_base_sec: float = 0.5,
         max_context_images: int | None = None,
+        max_context_bytes: int | None = 8 * 1024 * 1024,
+        max_output_tokens: int = 2048,
+        max_total_tokens: int | None = None,
+        temperature: float = 0.0,
+        top_p: float = 1.0,
+        sampling_seed: int | None = None,
+        model_revision: str | None = None,
+        endpoint_concurrency: int = 4,
+        endpoint_rpm: int = 0,
+        max_response_bytes: int = 8 * 1024 * 1024,
+        request_timeout_sec: float = 120,
     ) -> None:
         parsed = urlparse(base_url)
         if (
@@ -113,6 +126,29 @@ class OpenAICompatibleAgent:
         if max_context_images is not None and (type(max_context_images) is not int or max_context_images < 0):
             raise ValueError("max_context_images must be a nonnegative integer")
         self.max_context_images = max_context_images
+        for name, value in (("max_output_tokens", max_output_tokens), ("max_response_bytes", max_response_bytes)):
+            if type(value) is not int or value < 1:
+                raise ValueError(f"{name} must be positive")
+        if max_total_tokens is not None and (type(max_total_tokens) is not int or max_total_tokens < 1):
+            raise ValueError("max_total_tokens must be positive")
+        if (
+            not math.isfinite(temperature)
+            or not 0 <= temperature <= 2
+            or not math.isfinite(top_p)
+            or not 0 < top_p <= 1
+        ):
+            raise ValueError("invalid sampling parameters")
+        self.max_context_bytes = max_context_bytes
+        self.max_output_tokens, self.max_total_tokens = max_output_tokens, max_total_tokens
+        self.temperature, self.top_p, self.sampling_seed = temperature, top_p, sampling_seed
+        self.model_revision, self.max_response_bytes = model_revision, max_response_bytes
+        self.endpoint_concurrency, self.endpoint_rpm = endpoint_concurrency, endpoint_rpm
+        if type(request_timeout_sec) not in {int, float} or not 0 < request_timeout_sec <= 3600:
+            raise ValueError("model request timeout must be in (0,3600]")
+        self.request_timeout_sec, self.cancel_check = request_timeout_sec, None
+        self.limiter = EndpointLimiter(
+            self.base_url, concurrency=endpoint_concurrency, requests_per_minute=endpoint_rpm
+        )
 
     @property
     def worldline_config(self):
@@ -123,35 +159,81 @@ class OpenAICompatibleAgent:
             "max_context_images": self.max_context_images,
             "max_retries": self.max_retries,
             "retry_base_sec": self.retry_base_sec,
+            "max_context_bytes": self.max_context_bytes,
+            "max_output_tokens": self.max_output_tokens,
+            "max_total_tokens": self.max_total_tokens,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "sampling_seed": self.sampling_seed,
+            "model_revision": self.model_revision,
+            "endpoint_concurrency": self.endpoint_concurrency,
+            "endpoint_rpm": self.endpoint_rpm,
+            "max_response_bytes": self.max_response_bytes,
+            "request_timeout_sec": self.request_timeout_sec,
         }
 
     def _completion(self) -> dict:
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
             raise BudgetExceeded("model wall-clock budget exhausted")
+        used = self.usage.get(
+            "total_tokens", self.usage.get("prompt_tokens", 0) + self.usage.get("completion_tokens", 0)
+        )
+        if self.max_total_tokens is not None and used >= self.max_total_tokens:
+            raise BudgetExceeded("reported model token budget exhausted")
+        context = (
+            self.messages.model_context(self.max_context_images, self.max_context_bytes, hydrate=False)
+            if isinstance(self.messages, MessageHistory)
+            else model_context(self.messages, max_images=self.max_context_images, max_bytes=self.max_context_bytes)
+        )
+        removed = len(self.messages) - len(context)
+        if removed:
+            self.emit("model.context_trimmed", {"removed_messages": removed, "max_bytes": self.max_context_bytes})
+        self.emit("model.request_context", {"model": self.model, "messages": context, "tools": tools_for(self.spec)})
+        if isinstance(self.messages, MessageHistory):
+            context = hydrate_media(context, self.messages.media.root)
         body = {
             "model": self.model,
-            "messages": self.messages.model_context(self.max_context_images)
-            if isinstance(self.messages, MessageHistory)
-            else model_context(self.messages, max_images=self.max_context_images),
+            "messages": context,
             "tools": tools_for(self.spec),
             "tool_choice": "auto",
             "stream": False,
+            "max_tokens": min(self.max_output_tokens, self.max_total_tokens - int(used))
+            if self.max_total_tokens
+            else self.max_output_tokens,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
         }
+        if self.sampling_seed is not None:
+            body["seed"] = self.sampling_seed
         headers = {"Content-Type": "application/json"}
         key = os.environ.get(self.api_key_env)
         if key:
             headers["Authorization"] = f"Bearer {key}"
-        request = urllib.request.Request(self.url, data=json.dumps(body).encode(), headers=headers)
+        request = urllib.request.Request(self.url, data=json.dumps(body, ensure_ascii=False).encode(), headers=headers)
         for attempt in range(self.max_retries + 1):
             self.usage["model_requests"] = self.usage.get("model_requests", 0) + 1
             remaining = self.deadline - time.monotonic()
             if remaining <= 0:
                 raise BudgetExceeded("model wall-clock budget exhausted")
             try:
-                with urllib.request.urlopen(request, timeout=min(remaining, 120)) as response:
-                    result = json.load(response)
+                started = time.monotonic()
+                with self.limiter.request(self.deadline, cancel_check=self.cancel_check):
+                    self.emit("model.admitted", {"wait_sec": time.monotonic() - started})
+                    remaining = self.deadline - time.monotonic()
+                    result = http_completion(
+                        request,
+                        min(self.deadline, time.monotonic() + self.request_timeout_sec),
+                        self.max_response_bytes,
+                        cancel_check=self.cancel_check,
+                    )
+                self.emit("model.request_finished", {"duration_sec": time.monotonic() - started})
+                self.usage["model_request_duration_s"] = (
+                    self.usage.get("model_request_duration_s", 0) + time.monotonic() - started
+                )
                 break
+            except ModelAPIError as error:
+                failure = error
             except urllib.error.HTTPError as error:
                 try:
                     retry_after = float(error.headers.get("Retry-After", ""))
@@ -165,7 +247,9 @@ class OpenAICompatibleAgent:
             except ValueError as error:
                 raise ModelAPIError("model API returned malformed JSON", status=422) from error
             if not failure.retryable or attempt == self.max_retries:
+                self.usage["unknown_usage_requests"] = self.usage.get("unknown_usage_requests", 0) + 1
                 raise failure
+            self.usage["unknown_usage_requests"] = self.usage.get("unknown_usage_requests", 0) + 1
             delay = min(
                 30,
                 max(
@@ -186,11 +270,18 @@ class OpenAICompatibleAgent:
             raise ModelAPIError("model API returned invalid usage metadata", status=422)
         safe_usage = {}
         for key, value in raw_usage.items():
+            if key in {"model_requests", "model_request_duration_s", "invalid_usage_fields", "unknown_usage_requests"}:
+                continue
             if type(value) in {int, float} and math.isfinite(value) and value >= 0:
                 safe_usage[key] = value
                 self.usage[key] = self.usage.get(key, 0) + value
             elif type(value) in {int, float, bool}:
                 self.usage["invalid_usage_fields"] = self.usage.get("invalid_usage_fields", 0) + 1
+        complete_usage = "total_tokens" in safe_usage or {"prompt_tokens", "completion_tokens"} <= safe_usage.keys()
+        if not complete_usage:
+            self.usage["unknown_usage_requests"] = self.usage.get("unknown_usage_requests", 0) + 1
+            if self.max_total_tokens is not None:
+                raise ModelAPIError("token-budgeted model endpoint must report token usage", status=422)
         self.emit("model.response", {"model": self.model, "usage": safe_usage})
         try:
             message = result["choices"][0]["message"]
