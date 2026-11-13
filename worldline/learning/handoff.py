@@ -9,6 +9,7 @@ from pathlib import Path
 
 from worldline.datasets import _jsonl, _record_split, validate_datasets
 from worldline.media import MediaStore
+from worldline.learning.assets import dataset_media_root
 from worldline.run import write_json
 from worldline.storage import staged_directory, file_sha256
 from worldline.learning.formats.messages import normalized_messages
@@ -24,14 +25,20 @@ def _export_handoff(
     validation_file: Path | None = None,
     model: str = "REPLACE_WITH_MODEL",
     template: str = "qwen",
+    media_root: Path | None = None,
+    parquet_batch_bytes: int = 8 * 1024 * 1024,
+    max_record_bytes: int = 64 * 1024 * 1024,
+    max_media_bytes: int = 64 * 1024 * 1024,
 ):
     if framework not in {"llama-factory", "verl"}:
         raise ValueError("unsupported training framework")
+    if any(type(value) is not int or value < 1 for value in (parquet_batch_bytes, max_record_bytes, max_media_bytes)):
+        raise ValueError("handoff byte budgets must be positive integers")
     inputs = [train_file.resolve()] + ([validation_file.resolve()] if validation_file else [])
-    validation = validate_datasets(inputs)
+    validation = validate_datasets(inputs, max_record_bytes=max_record_bytes)
     if not validation["valid"]:
         raise ValueError(f"training handoff validation failed: {validation['errors']}")
-    for _, row in _jsonl(inputs[0]):
+    for _, row in _jsonl(inputs[0], max_record_bytes=max_record_bytes):
         if _record_split(row) in {"test", "evaluation", "held_out", "validation"}:
             raise ValueError("held-out records cannot be placed in the training package")
     output_dir = output_dir.resolve()
@@ -41,9 +48,10 @@ def _export_handoff(
     (output_dir / "data").mkdir()
     media = MediaStore(output_dir)
     counts, rejected, thoughts = {}, {}, 0
-    dataset_info = {}
+    dataset_info, buffer_stats = {}, {}
     for split, path in zip(("train", "validation"), inputs):
         count, failures = 0, 0
+        source_root = dataset_media_root(path, media_root)
         writers = []
         seen_prompts = set()
         if framework == "llama-factory":
@@ -84,19 +92,33 @@ def _export_handoff(
                 ]
             )
             writers = [
-                ParquetStream(output_dir / "data" / f"{split}.parquet", sft_schema),
-                ParquetStream(output_dir / "data" / f"{split}-rl.parquet", rl_schema),
+                ParquetStream(
+                    output_dir / "data" / f"{split}.parquet",
+                    sft_schema,
+                    max_batch_bytes=parquet_batch_bytes,
+                    max_record_bytes=max_record_bytes,
+                ),
+                ParquetStream(
+                    output_dir / "data" / f"{split}-rl.parquet",
+                    rl_schema,
+                    max_batch_bytes=parquet_batch_bytes,
+                    max_record_bytes=max_record_bytes,
+                ),
             ]
         rejected_stream = (output_dir / f"rejected-{split}.jsonl").open("w")
         try:
-            for _, row in _jsonl(path):
+            for _, row in _jsonl(path, max_record_bytes=max_record_bytes):
                 try:
                     if framework == "llama-factory":
-                        converted, lost = llama_factory_record(row, media)
+                        converted, lost = llama_factory_record(
+                            row, media, source_root=source_root, max_media_bytes=max_media_bytes
+                        )
                         thoughts += lost
                         stream.write(json.dumps(converted, ensure_ascii=False) + "\n")
                     else:
-                        messages, images = normalized_messages(row, media)
+                        messages, images = normalized_messages(
+                            row, media, source_root=source_root, max_media_bytes=max_media_bytes
+                        )
                         image_rows = [{"bytes": (output_dir / image).read_bytes(), "path": None} for image in images]
                         tools = json.dumps(row.get("tools") or [], ensure_ascii=False)
                         metadata = row.get("metadata", {})
@@ -112,7 +134,7 @@ def _export_handoff(
                             "split": split,
                             "tools_json": tools,
                         }
-                        writers[0].append(
+                        prepared_sft = writers[0].prepare(
                             {
                                 "id": row["id"],
                                 "messages": json.dumps(messages, ensure_ascii=False),
@@ -122,9 +144,10 @@ def _export_handoff(
                             }
                         )
                         key = hashlib.sha256(json.dumps((prompt, info), sort_keys=True).encode()).hexdigest()
+                        prepared_rl = None
                         if key not in seen_prompts:
                             initial_images = image_rows[: sum(m["content"].count("<image>") for m in prompt)]
-                            writers[1].append(
+                            prepared_rl = writers[1].prepare(
                                 {
                                     "data_source": "worldline",
                                     "prompt": prompt,
@@ -134,6 +157,9 @@ def _export_handoff(
                                     "extra_info": info,
                                 }
                             )
+                        writers[0].append_prepared(prepared_sft)
+                        if prepared_rl is not None:
+                            writers[1].append_prepared(prepared_rl)
                             seen_prompts.add(key)
                     count += 1
                 except (ValueError, KeyError, TypeError) as error:
@@ -146,6 +172,9 @@ def _export_handoff(
             for writer in writers:
                 writer.close()
         counts[split], rejected[split] = count, failures
+        buffer_stats[split] = [
+            {"peak_buffered_bytes": writer.peak_buffered_bytes, "row_groups": writer.row_groups} for writer in writers
+        ]
         dataset_info[f"worldline_{split}"] = {
             "file_name": f"data/{split}.jsonl",
             "formatting": "sharegpt",
@@ -192,6 +221,12 @@ def _export_handoff(
         "rejected": rejected,
         "function_only_prose_omissions": thoughts,
         "media_files": media.files_written,
+        "byte_budgets": {
+            "parquet_batch": parquet_batch_bytes,
+            "record": max_record_bytes,
+            "episode_media": max_media_bytes,
+        },
+        "parquet_buffers": buffer_stats,
         "inputs": [{"path": str(path), "sha256": file_sha256(path)} for path in inputs],
         "files": {
             str(path.relative_to(output_dir)): file_sha256(path) for path in output_dir.rglob("*") if path.is_file()

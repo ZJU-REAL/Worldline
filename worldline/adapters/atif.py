@@ -6,11 +6,14 @@ import base64
 import json
 from pathlib import Path
 from typing import Any, Mapping
+from worldline.media import MediaStore
 
 IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 
 
-def _content(value: Any, root: Path | None, trajectory_path: Path | None) -> str | list[dict]:
+def _content(
+    value: Any, root: Path | None, trajectory_path: Path | None, media_store: MediaStore | None
+) -> str | list[dict]:
     if value is None:
         return ""
     if isinstance(value, str):
@@ -42,7 +45,11 @@ def _content(value: Any, root: Path | None, trajectory_path: Path | None) -> str
             path = existing[0]
             if path.stat().st_size > 32 * 1024 * 1024:
                 raise ValueError("ATIF image exceeds 32 MiB per-image export limit")
-            url = f"data:{mime};base64," + base64.b64encode(path.read_bytes()).decode()
+            url = (
+                media_store.import_file(path, mime, "data_url")
+                if media_store
+                else f"data:{mime};base64," + base64.b64encode(path.read_bytes()).decode()
+            )
             parts.append({"type": "image_url", "image_url": {"url": url}})
         else:
             # An unsupported modality must be visible as rejected data, never
@@ -65,7 +72,11 @@ def _tool_call(call: Mapping) -> dict:
 
 
 def atif_messages(
-    trajectory: Mapping[str, Any], *, artifact_root: Path | None = None, trajectory_path: Path | None = None
+    trajectory: Mapping[str, Any],
+    *,
+    artifact_root: Path | None = None,
+    trajectory_path: Path | None = None,
+    media_store: MediaStore | None = None,
 ) -> tuple[Mapping[str, Any], ...]:
     """Preserve actual text/image content and tool observations for training."""
     messages = []
@@ -76,7 +87,7 @@ def atif_messages(
         if step.get("is_copied_context"):
             raise ValueError("copied ATIF context requires a trainer with explicit loss masking")
         role = role_map.get(str(step.get("source")), str(step.get("source") or "user"))
-        message = {"role": role, "content": _content(step.get("message"), artifact_root, trajectory_path)}
+        message = {"role": role, "content": _content(step.get("message"), artifact_root, trajectory_path, media_store)}
         calls = step.get("tool_calls")
         if calls:
             message["tool_calls"] = [_tool_call(call) for call in calls]
@@ -88,7 +99,10 @@ def atif_messages(
         for result in observation.get("results") or []:
             if not isinstance(result, dict):
                 raise ValueError("invalid ATIF observation result")
-            tool = {"role": "tool", "content": _content(result.get("content"), artifact_root, trajectory_path)}
+            tool = {
+                "role": "tool",
+                "content": _content(result.get("content"), artifact_root, trajectory_path, media_store),
+            }
             if result.get("source_call_id"):
                 tool["tool_call_id"] = result["source_call_id"]
             if tool["content"] or tool.get("tool_call_id"):

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import time
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -18,7 +17,10 @@ from worldline.run import RunRecord, write_json, write_record, make_run_id
 from worldline.runtime.process import AgentView, ProcessEnvironment
 from worldline.tasks import load_native_task
 from worldline.trace import TraceEvent, TraceWriter
-from worldline.media import MediaStore
+from worldline.media import MediaStore, MessageHistory
+from worldline.runtime.verdict import checked_verdict
+from worldline.agents.config import runtime_configuration, comparison_configuration
+from worldline.runtime.tools import public_spec
 
 
 def evaluate_native(
@@ -63,6 +65,7 @@ def evaluate_native(
                 "max_actions": definition.max_actions,
                 "max_turns": definition.max_turns,
                 "reset_budget": definition.reset_budget,
+                "restore_budget": definition.restore_budget,
             },
         },
     )
@@ -85,11 +88,13 @@ def evaluate_native(
     write_record(run_dir, record)
     environment = None
     view = None
-    messages = [{"role": "user", "content": task.instruction}]
+    messages = MessageHistory(media)
+    messages.append({"role": "user", "content": task.instruction})
     usage = {}
     outcome, reward, error, metrics = "infra_error", None, None, {}
     error_code, retryable, interrupted = None, False, None
     environment_spec_hash = None
+    runtime_config = {}
     timings = {}
     provider_failure = None
     try:
@@ -100,6 +105,8 @@ def evaluate_native(
             else ProcessEnvironment(definition, run_dir)
         )
         initial = environment.start()
+        record = replace(record, metadata={**record.metadata, "execution": environment.execution})
+        write_record(run_dir, record)
         timings["environment_startup_s"] = time.monotonic() - stage
         from worldline.agents.tool_agent import tools_for
 
@@ -108,7 +115,7 @@ def evaluate_native(
         emit("environment.started", {"spec": environment.spec, "observation": initial})
         view = AgentView(environment, emit)
         agent = agent_factory(
-            spec=environment.spec,
+            spec=public_spec(environment.spec),
             initial_observation=initial,
             emit=emit,
             messages=messages,
@@ -116,6 +123,14 @@ def evaluate_native(
             max_turns=definition.max_turns,
             deadline=environment.deadline,
         )
+        runtime_config = runtime_configuration(agent)
+        json.dumps(runtime_config, allow_nan=False)
+        record = replace(
+            record,
+            model=record.model or runtime_config["settings"].get("model"),
+            metadata={**record.metadata, "agent_runtime_config": runtime_config},
+        )
+        write_record(run_dir, record)
         try:
             stage = time.monotonic()
             agent.run(task, view)
@@ -132,15 +147,8 @@ def evaluate_native(
         stage = time.monotonic()
         verdict = environment.verify(task, run_dir)
         timings["verification_duration_s"] = time.monotonic() - stage
-        if verdict.infra_error:
-            raise RuntimeError(verdict.infra_error)
-        if not math.isfinite(verdict.reward):
-            raise RuntimeError("verifier returned a non-finite reward")
-        if any(not isinstance(value, (int, float)) or not math.isfinite(value) for value in verdict.metrics.values()):
-            raise RuntimeError("verifier returned invalid metrics")
-        reward, metrics = verdict.reward, dict(verdict.metrics)
-        success = metrics.get("success", reward == 1) == 1
-        outcome = "success" if success else "failure"
+        outcome, reward, metrics = checked_verdict(verdict)
+        success = outcome == "success"
         if provider_failure and not success and metrics.get("terminated") != 1:
             outcome, reward = "infra_error", None
         elif outcome != "infra_error":
@@ -169,10 +177,11 @@ def evaluate_native(
                 "tools": environment.spec.get("tools", []) if environment is not None else [],
             },
         )
+    media_files, media_bytes = media.inventory()
     metrics.update(
         run_duration_s=(time.time_ns() - record.started_at_ns) / 1e9,
-        media_files=float(media.files_written),
-        media_bytes=float(media.bytes_written),
+        media_files=float(media_files),
+        media_bytes=float(media_bytes),
     )
     metrics.update(timings)
     emit("run.finished", {"outcome": outcome, "reward": reward, "error": error})
@@ -193,6 +202,7 @@ def evaluate_native(
         "harness": harness_version,
         "worldline_version": __version__,
         "agent_config": agent_config or {},
+        "agent_runtime_config": comparison_configuration(runtime_config) if runtime_config else {},
         "environment_spec_hash": environment_spec_hash,
     }
     key = hashlib.sha256(json.dumps(configuration, sort_keys=True).encode()).hexdigest()
@@ -211,7 +221,7 @@ def evaluate_native(
         task_version=task.version,
         comparison_key=f"{task.id}@{key}",
         agent=agent_name,
-        model=model,
+        model=record.model,
         error_code=error_code,
         retryable=retryable,
         logical_trial_id=logical_trial_id,

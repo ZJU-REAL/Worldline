@@ -5,6 +5,10 @@ from worldline.agents.tool_agent import observation_content, prepare_messages
 
 
 class FormReferenceAgent:
+    @property
+    def worldline_config(self):
+        return {"reference_policy": "project-form-fixture", "noop": self.noop}
+
     def __init__(self, *, spec, initial_observation, emit, messages, usage, max_turns, deadline, noop=False):
         self.spec, self.initial, self.messages, self.emit, self.noop = spec, initial_observation, messages, emit, noop
 

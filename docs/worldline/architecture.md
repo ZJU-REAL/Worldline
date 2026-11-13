@@ -61,7 +61,7 @@ def plugin():
 
 Python 接口 `evaluate_native(..., agent_factory=...)` 接受任意满足 `Agent` 协议的工厂。工厂收到公开 spec、初始观测、deadline、turn budget，以及需要追加的 `messages`、`usage` 和 `emit`。核心运行器不读取 Agent 返回值作为奖励。新的 memory、skill routing 或 code execution harness 可以在这层实现，并保存配置版本。
 
-自定义训练器使用 `backend = "command"`，命令为参数数组，支持 `{train_file}`、`{validation_file}`、`{output_dir}` 等配置替换，不经过 shell。verl、TRL 或分布式训练入口可以独立消费同一数据；目前内置的是 Transformers 文本 SFT，RL JSONL 是离线训练视图，在线 GRPO 环境连接器尚未实现。
+自定义训练器使用 `backend = "command"`，命令为参数数组，支持 `{train_file}`、`{validation_file}`、`{output_dir}` 等配置替换，不经过 shell。verl、TRL 或分布式训练入口可以独立消费同一数据；内置 Transformers 文本 SFT，LLaMA-Factory/verl 数据交付独立。外部在线 sampler 可使用 `NativeTrainingSession`；具体版本的 PPO/GRPO 训练器仍需要训练侧接入。
 
 ## 执行与可信边界
 
@@ -75,10 +75,18 @@ Python 接口 `evaluate_native(..., agent_factory=...)` 接受任意满足 `Agen
 
 原生消息保留工具调用、工具响应和多模态内容；`worldline.messages/0.2` 的二进制通过内容寻址引用保存，兼容读取 0.1，导出时校验 hash 并恢复。trace 按事件批量同步，在 run 边界强制同步。SFT 默认仅成功轨迹；preference 配对还要求任务版本、种子、比较配置及初始 prompt 相同；RL 保留成功/失败轨迹和可信 reward。基础设施错误和显式 `test/evaluation/held_out` 轨迹不进入训练导出。
 
-`split_group` 将演示改写、场景变体和恢复分支绑定；显式 train/validation/test 划分优先于哈希划分，冲突直接失败。原始 benchmark 未声明 split 的历史轨迹不能自动证明训练准入，使用者应先补充并审核数据清单。训练入口拒绝 held-out/validation 记录进入 train，并校验跨文件 task/group 重叠。
+`split_group` 将演示改写、场景变体和恢复分支绑定；显式 train/validation/test 划分优先于哈希划分，冲突直接失败。未声明 split 的历史轨迹默认排除；显式审核开关记录在 manifest。训练入口拒绝 held-out/validation 记录进入 train，并校验跨文件 task/group 重叠。
 
 训练配置、输入哈希、计数、有效命令和退出状态写入训练 manifest。模型训练完成后通过模型服务重新接入 `rollout --agent openai-compatible`，在显式 test 任务上复评；部署模型服务由训练/服务后端承担。
 
 ## 0.3 存储与上游边界
 
 核心包不再包含 EFE CLI/Harbor import hook。EFE 通过显式 checkout 适配，来源与 pin 见 [上游说明](upstreams.md)。`storage.py` 统一原子记录、媒体发布与整包交付；`runtime/resources.py` 负责资源 lease，`runtime/queue.py` 提供独立的批次查询和停止领取控制。训练格式按公共消息、LF、verl 分模块维护。Harbor 每个 normalized trial 保存 split/seed/version 元数据，catalog 的 split/group 传播到 run，切分结果也写回样本。
+
+## 0.4 会话与存储
+
+`runtime/state.py` 的 DurableQueue 由 Native/Harbor 共用；`runtime/interactive.py` 提供串行的外部会话和 watchdog；`learning/rollout.py` 加入 train 准入、资源池与不可评分 mask。环境、模型与训练框架仍无相互启动依赖。
+
+Worker 二进制通过共享内容寻址产物传递，模型历史用引用保留；只在模型请求中恢复选定图片。蒸馏默认同样保留引用，交付按 manifest 根目录定位，Parquet 同时限制行数与字节。
+
+Checkpoint 是可选 `CheckpointEnvironment` 协议：可信 controller 校验 task/环境版本和 session 签发记录，只有声明的 restore_budget 可消耗。模型公开工具不增加恢复能力；累计动作、计算步数和墙钟不回退。当前验证的是 MuJoCo fixture，其他环境保持能力关闭。

@@ -46,6 +46,33 @@ def publish_bytes(path: Path, raw: bytes, *, exclusive: bool = False) -> bool:
         temporary.unlink(missing_ok=True)
 
 
+def publish_file(source: Path, path: Path, *, sha256: str) -> bool:
+    """Copy and verify a blob in bounded chunks before exclusive publication."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temporary = Path(name)
+    digest = hashlib.sha256()
+    try:
+        with os.fdopen(fd, "wb") as outgoing, source.open("rb") as incoming:
+            for chunk in iter(lambda: incoming.read(256 * 1024), b""):
+                digest.update(chunk)
+                outgoing.write(chunk)
+            outgoing.flush()
+            os.fsync(outgoing.fileno())
+        if digest.hexdigest() != sha256:
+            raise ValueError("media artifact hash mismatch during copy")
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            if file_sha256(path) != sha256:
+                raise ValueError("existing media artifact hash mismatch")
+            return False
+        sync_directory(path.parent)
+        return True
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 @contextmanager
 def staged_directory(destination: Path):
     """Publish a complete data package, keeping failed builds apart for diagnosis."""

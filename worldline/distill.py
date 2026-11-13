@@ -22,6 +22,8 @@ def _build_distillation_bundle(
     seed: str = "worldline-v1",
     include_failures_in_sft: bool = False,
     max_pairs_per_task: int = 50,
+    media_mode: str = "reference",
+    allow_unspecified_split: bool = False,
 ) -> dict[str, Any]:
     """Export, split, and validate all supported training views."""
 
@@ -35,6 +37,9 @@ def _build_distillation_bundle(
         {name: output_dir / "raw" / f"{name}.jsonl" for name in ("sft", "preference", "rl")},
         include_failures=include_failures_in_sft,
         max_pairs_per_task=max_pairs_per_task,
+        media_mode=media_mode,
+        media_root=output_dir,
+        allow_unspecified_split=allow_unspecified_split,
     )
     for format_name in ("sft", "preference", "rl"):
         raw_path = output_dir / "raw" / f"{format_name}.jsonl"

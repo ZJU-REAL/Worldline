@@ -7,19 +7,50 @@ import shutil
 import subprocess
 import time
 import hashlib
+import json
 from dataclasses import asdict, replace
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Mapping, Sequence, Callable
 
 from worldline.adapters.harbor import load_task
 from worldline.run import RunRecord, write_record, make_run_id
 from worldline.run import write_json
-from worldline.results import normalize_harbor_trial
+from worldline.results import normalize_harbor_trial, NormalizedResult
 from worldline.trace import TraceEvent, TraceWriter
 
 
 class BackendUnavailableError(RuntimeError):
     pass
+
+
+def recover_harbor_run(run_dir: Path) -> tuple[RunRecord, bool]:
+    """Ingest a finished backend job; never relaunch an ambiguous started trial."""
+    record = RunRecord(**json.loads((run_dir / "run.json").read_text()))
+    if record.status in {"completed", "failed", "infra_error", "planned"}:
+        return record, True
+    if record.status in {"created", "cancelled"}:
+        record = replace(record, status="cancelled", finished_at_ns=time.time_ns())
+        write_record(run_dir, record)
+        return record, False
+    trace = TraceWriter(run_dir / "trace.jsonl")
+    try:
+        snapshot = json.loads((run_dir / "task.json").read_text())
+        _ingest_completed_trials(run_dir / "harbor", run_dir, trace, record.run_id, task_snapshot=snapshot)
+        summary = run_dir / "harbor/job/result.json"
+        job = json.loads(summary.read_text()) if summary.is_file() else {}
+        completed = bool(job.get("finished_at"))
+        status = "completed" if completed else "orphaned"
+        record = replace(
+            record,
+            status=status,
+            finished_at_ns=time.time_ns(),
+            metadata={**record.metadata, "recovered": True, "backend_completion_confirmed": completed},
+        )
+        write_record(run_dir, record)
+        trace.append(TraceEvent(record.run_id, "run.recovered", {"status": status}))
+        return record, True
+    finally:
+        trace.close()
 
 
 def harbor_command(
@@ -82,6 +113,7 @@ def evaluate_harbor(
     dry_run: bool = False,
     env: Mapping[str, str] | None = None,
     task_metadata: Mapping | None = None,
+    on_created: Callable | None = None,
 ) -> tuple[RunRecord, Path]:
     """Run one Harbor task and preserve a backend-neutral Worldline record."""
 
@@ -119,6 +151,8 @@ def evaluate_harbor(
     )
     write_record(run_dir, record)
     write_json(run_dir / "task.json", asdict(task))
+    if on_created is not None:
+        on_created(record, run_dir)
     trace.append(TraceEvent(run_id=run_id, kind="run.created", payload={"command": command}))
 
     if dry_run:
@@ -160,11 +194,29 @@ def evaluate_harbor(
         raise
     finished_at = time.time_ns()
     status = "completed" if completed.returncode == 0 else "failed"
+    if ingested == 0:
+        missing = NormalizedResult(
+            "worldline.result/0.1",
+            "harbor",
+            run_id,
+            task.id,
+            "infra_error",
+            None,
+            source=str(run_dir),
+            error="backend exited without a readable completed trial",
+            task_version=task.version,
+            agent=agent,
+            model=model,
+            task_metadata={**task.metadata, "seed": task.seed, "split": task.split},
+        )
+        write_json(run_dir / "result.normalized.json", asdict(missing))
+        status = "infra_error"
     result = replace(
         running,
         status=status,
         finished_at_ns=finished_at,
         exit_code=completed.returncode,
+        metadata={**running.metadata, "normalized_results": ingested},
     )
     write_record(run_dir, result)
     trace.append(

@@ -38,4 +38,7 @@ class HarborMultiTrialTest(unittest.TestCase):
             trace.close()
             self.assertEqual(len(discover_results([run])), 2)
             self.assertEqual(build_report([run])["summary"]["trials"], 2)
-            self.assertEqual(export_dataset([run], root / "rl.jsonl", format="rl")["records"], 2)
+            self.assertEqual(export_dataset([run], root / "rl.jsonl", format="rl")["records"], 0)
+            self.assertEqual(
+                export_dataset([run], root / "reviewed.jsonl", format="rl", allow_unspecified_split=True)["records"], 2
+            )

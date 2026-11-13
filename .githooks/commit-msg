@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+if [ -x .venv/bin/python ]; then
+    exec .venv/bin/python -m worldline.development commit-msg "$1"
+fi
+exec python3 -m worldline.development commit-msg "$1"

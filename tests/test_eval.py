@@ -84,8 +84,9 @@ class HarborEvaluationTest(unittest.TestCase):
                 make_task(root), agent="oracle", runs_dir=root / "runs", executable=str(backend)
             )
 
-            self.assertEqual(record.status, "completed")
+            self.assertEqual(record.status, "infra_error")
             self.assertEqual(record.exit_code, 0)
+            self.assertEqual(json.loads((run_dir / "result.normalized.json").read_text())["outcome"], "infra_error")
             self.assertEqual((run_dir / "backend.log").read_text(encoding="utf-8"), "fake backend\n")
 
     def test_automatically_ingests_backend_trial(self) -> None:

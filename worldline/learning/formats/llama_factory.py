@@ -4,8 +4,8 @@ import json
 from worldline.learning.formats.messages import normalized_messages
 
 
-def llama_factory_record(row, media):
-    messages, images = normalized_messages(row, media)
+def llama_factory_record(row, media, **options):
+    messages, images = normalized_messages(row, media, **options)
     conversations, system, dropped_thoughts = [], [], 0
     for message in messages:
         role, content = message["role"], message["content"]

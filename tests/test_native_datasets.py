@@ -60,6 +60,8 @@ class NativeDatasetTest(unittest.TestCase):
             native_result(root, "failed-prompt", outcome="failure", image=True)
             output = root / "pref.jsonl"
             self.assertEqual(export_dataset([root], output, format="preference")["records"], 0)
+            native_result(root, "failed-validation", split="validation", outcome="failure")
+            self.assertEqual(export_dataset([root], output, format="preference")["records"], 0)
             native_result(root, "failed-v1", outcome="failure")
             self.assertEqual(export_dataset([root], output, format="preference")["records"], 1)
 

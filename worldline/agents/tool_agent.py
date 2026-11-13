@@ -10,12 +10,15 @@ import json
 import os
 import time
 import random
+import math
 import urllib.error
 import urllib.request
 from typing import Any
 from urllib.parse import urlparse
 
 from worldline.contracts import Sandbox, Task
+from worldline.runtime.tools import execute_tool
+from worldline.media import model_context, MessageHistory
 from worldline.errors import AgentError, BudgetExceeded, InvalidAction, ModelAPIError
 
 
@@ -86,11 +89,20 @@ class OpenAICompatibleAgent:
         deadline: float,
         max_retries: int = 2,
         retry_base_sec: float = 0.5,
+        max_context_images: int | None = None,
     ) -> None:
         parsed = urlparse(base_url)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password:
-            raise ValueError("base_url must be an HTTP(S) URL without embedded credentials")
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("base_url must be an HTTP(S) URL without credentials, query or fragment")
         self.url = base_url.rstrip("/") + "/chat/completions"
+        self.base_url = base_url.rstrip("/")
         self.model, self.api_key_env = model, api_key_env
         self.spec, self.initial = spec, initial_observation
         self.emit, self.messages, self.usage = emit, messages, usage
@@ -98,6 +110,20 @@ class OpenAICompatibleAgent:
         if type(max_retries) is not int or not 0 <= max_retries <= 5 or retry_base_sec < 0:
             raise ValueError("model retries must be in [0, 5] and retry delay nonnegative")
         self.max_retries, self.retry_base_sec = max_retries, retry_base_sec
+        if max_context_images is not None and (type(max_context_images) is not int or max_context_images < 0):
+            raise ValueError("max_context_images must be a nonnegative integer")
+        self.max_context_images = max_context_images
+
+    @property
+    def worldline_config(self):
+        return {
+            "model": self.model,
+            "base_url": self.base_url,
+            "api_key_env": self.api_key_env,
+            "max_context_images": self.max_context_images,
+            "max_retries": self.max_retries,
+            "retry_base_sec": self.retry_base_sec,
+        }
 
     def _completion(self) -> dict:
         remaining = self.deadline - time.monotonic()
@@ -105,7 +131,9 @@ class OpenAICompatibleAgent:
             raise BudgetExceeded("model wall-clock budget exhausted")
         body = {
             "model": self.model,
-            "messages": self.messages,
+            "messages": self.messages.model_context(self.max_context_images)
+            if isinstance(self.messages, MessageHistory)
+            else model_context(self.messages, max_images=self.max_context_images),
             "tools": tools_for(self.spec),
             "tool_choice": "auto",
             "stream": False,
@@ -151,14 +179,27 @@ class OpenAICompatibleAgent:
                 raise failure
             self.emit("model.retry", {"attempt": attempt + 1, "error_code": failure.code, "delay_sec": delay})
             time.sleep(delay)
-        for key, value in (result.get("usage") or {}).items():
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if not isinstance(result, dict):
+            raise ModelAPIError("model API returned a non-object response", status=422)
+        raw_usage = result.get("usage") or {}
+        if not isinstance(raw_usage, dict):
+            raise ModelAPIError("model API returned invalid usage metadata", status=422)
+        safe_usage = {}
+        for key, value in raw_usage.items():
+            if type(value) in {int, float} and math.isfinite(value) and value >= 0:
+                safe_usage[key] = value
                 self.usage[key] = self.usage.get(key, 0) + value
-        self.emit("model.response", {"model": self.model, "usage": result.get("usage", {})})
+            elif type(value) in {int, float, bool}:
+                self.usage["invalid_usage_fields"] = self.usage.get("invalid_usage_fields", 0) + 1
+        self.emit("model.response", {"model": self.model, "usage": safe_usage})
         try:
-            return result["choices"][0]["message"]
-        except (KeyError, IndexError, TypeError) as error:
-            raise AgentError("model returned no chat message") from error
+            message = result["choices"][0]["message"]
+            if not isinstance(message, dict) or not isinstance(message.get("content"), (str, list, type(None))):
+                raise ValueError("invalid chat message")
+            json.dumps(message, allow_nan=False)
+            return message
+        except (KeyError, IndexError, TypeError, ValueError) as error:
+            raise ModelAPIError("model API returned no valid chat message", status=422) from error
 
     def run(self, task: Task, sandbox: Sandbox) -> None:
         prepare_messages(self.messages, task, self.spec, self.initial)
@@ -190,16 +231,7 @@ class OpenAICompatibleAgent:
                         raise InvalidAction("attempt already finished")
                     if budget_error is not None:
                         raise InvalidAction("attempt budget already exhausted")
-                    if name == "act" and set(arguments) == {"action"}:
-                        result = sandbox.act(arguments["action"])
-                    elif name == "observe" and not arguments:
-                        result = sandbox.observe()
-                    elif name == "reset" and not arguments:
-                        result = sandbox.reset()
-                    elif name == "finish" and not arguments:
-                        result, finished = {"submitted": True}, True
-                    else:
-                        raise InvalidAction("unknown tool or invalid arguments")
+                    result, finished = execute_tool(name, arguments, sandbox)
                     content = observation_content(result)
                 except InvalidAction as error:
                     content = json.dumps({"error": str(error)})

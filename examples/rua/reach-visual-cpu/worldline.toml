@@ -1,0 +1,25 @@
+schema_version = "worldline.task/0.1"
+
+[task]
+id = "rua/reach-visual-cpu"
+domain = "rua"
+environment = "rua.mujoco-reach"
+split = "train"
+seed = 7
+
+[environment]
+target = [0.4, 0.25]
+threshold_m = 0.025
+frame_skip = 50
+render = true
+render_backend = "egl"
+
+[evaluation]
+timeout_sec = 120
+max_actions = 80
+max_turns = 80
+reset_budget = 0
+
+[metadata]
+split_group = "reach-positive-y"
+purpose = "integration_fixture"

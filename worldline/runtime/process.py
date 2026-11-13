@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import time
+import threading
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ from typing import Any
 from worldline.contracts import RunResult, SandboxCapabilities, Task
 from worldline.errors import BudgetExceeded, EnvironmentError, InvalidAction
 from worldline.tasks import NativeTask
+from worldline.media import hydrate_media
 
 
 class ProcessEnvironment:
@@ -23,6 +25,8 @@ class ProcessEnvironment:
 
     def __init__(self, definition: NativeTask, run_dir: Path, *, worker_env: dict[str, str] | None = None) -> None:
         self.definition = definition
+        self.run_dir = run_dir.resolve()
+        self._request_lock = threading.RLock()
         self.deadline = time.monotonic() + definition.timeout_sec
         self.log = (run_dir / "worker.log").open("wb")
         try:
@@ -40,9 +44,15 @@ class ProcessEnvironment:
             raise
         self.pending = b""
         self.spec: dict = {}
+        self.execution: dict = {}
         self.deadline_abort = False
+        self._closed = False
 
     def request(self, method: str, *, verification: bool = False, **payload: Any) -> Any:
+        with self._request_lock:
+            return self._request(method, verification=verification, **payload)
+
+    def _request(self, method: str, *, verification: bool = False, **payload: Any) -> Any:
         if self.process.poll() is not None:
             raise EnvironmentError(
                 f"environment process exited with {self.process.returncode}; see worker.log",
@@ -98,13 +108,20 @@ class ProcessEnvironment:
             error = response["error"]
             cls = InvalidAction if error["type"] == "InvalidAction" else EnvironmentError
             raise cls(f"{error['type']}: {error['message']}")
-        return response["result"]
+        try:
+            return hydrate_media(response["result"], self.run_dir)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise EnvironmentError(f"invalid worker media reference: {error}") from error
 
     def start(self) -> Any:
         result = self.request(
-            "start", task=asdict(self.definition.task), config=dict(self.definition.environment_config)
+            "start",
+            task=asdict(self.definition.task),
+            config=dict(self.definition.environment_config),
+            artifact_root=str(self.run_dir),
         )
         self.spec = result["spec"]
+        self.execution = result.get("execution", {})
         return result["observation"]
 
     def verify(self, task: Task, run_dir: Path) -> RunResult:
@@ -115,7 +132,20 @@ class ProcessEnvironment:
         write_json(evidence, result)
         return RunResult(result["reward"], result.get("metrics", {}), (evidence,), result.get("infra_error"))
 
+    def checkpoint(self):
+        if not self.spec.get("capabilities", {}).get("snapshot"):
+            raise InvalidAction("environment does not support checkpoints")
+        return self.request("checkpoint")
+
+    def restore(self, checkpoint):
+        if not self.spec.get("capabilities", {}).get("snapshot"):
+            raise InvalidAction("environment does not support checkpoints")
+        return self.request("restore", checkpoint=checkpoint)
+
     def close(self, *, graceful: bool = True) -> None:
+        if self._closed:
+            return
+        self._closed = True
         if graceful and self.process.poll() is None:
             try:
                 descriptor = self.process.stdin.fileno()
@@ -124,16 +154,27 @@ class ProcessEnvironment:
                 self.process.wait(timeout=0.5)
             except (OSError, subprocess.TimeoutExpired):
                 pass
+        # The worker may already have exited while descendants remain alive.
+        # Its dedicated process group is still ours to reap in that case.
+        try:
+            os.killpg(self.process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            self.process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.killpg(self.process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         if self.process.poll() is None:
             try:
-                os.killpg(self.process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            try:
                 self.process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                os.killpg(self.process.pid, signal.SIGKILL)
-                self.process.wait(timeout=2)
+            finally:
+                for stream in (self.process.stdin, self.process.stdout, self.log):
+                    if stream is not None:
+                        stream.close()
         for stream in (self.process.stdin, self.process.stdout, self.log):
             if stream is not None:
                 stream.close()
@@ -156,6 +197,7 @@ class AgentView:
     @property
     def capabilities(self) -> SandboxCapabilities:
         values = self._environment.spec.get("capabilities", {})
+        values = {**values, "snapshot": False, "fork": False}
         return SandboxCapabilities(
             **{key: bool(values.get(key, False)) for key in SandboxCapabilities.__dataclass_fields__}
         )

@@ -12,6 +12,10 @@ from worldline.errors import BudgetExceeded
 
 
 class ReachReferenceAgent:
+    @property
+    def worldline_config(self):
+        return {"reference_policy": "planar-inverse-kinematics", "noop": self.noop}
+
     def __init__(self, *, spec, initial_observation, emit, messages, usage, max_turns, deadline, noop=False):
         self.spec, self.initial = spec, initial_observation
         self.emit, self.messages = emit, messages

@@ -29,3 +29,8 @@ EFE is an optional, pinned submodule. Its own contribution and protocol rules ap
 that checkout. See [upstream integration](docs/worldline/upstreams.md) for initialization, external
 checkout selection, attribution and updating the pin. Worldline does not modify upstream task files
 or install EFE's global Harbor import hook.
+
+Run `python -m worldline.development check` for a logged platform test/Ruff check. To enable the
+repository hooks, run `git config core.hooksPath .githooks`. The push hook reuses only a recent
+successful check with matching source and environment. Commit hooks reject AI authors/committers
+and AI Co-authored-by trailers; use the configured human identity.

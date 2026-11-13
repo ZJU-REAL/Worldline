@@ -9,6 +9,16 @@ from worldline.doctor import doctor
 
 
 class DoctorTest(unittest.TestCase):
+    def test_empty_gpu_probe_does_not_report_hardware_ready(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with patch(
+                "worldline.doctor.shutil.which",
+                side_effect=lambda name: "/empty/nvidia-smi" if name == "nvidia-smi" else None,
+            ):
+                with patch("worldline.doctor._probe", return_value={"ok": True, "detail": ""}):
+                    result = doctor(Path(temp))
+            self.assertFalse(result["checks"]["nvidia"]["ok"])
+
     def test_reports_missing_runtime_without_hiding_framework_readiness(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

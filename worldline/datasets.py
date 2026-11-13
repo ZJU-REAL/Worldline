@@ -9,15 +9,30 @@ import math
 import sqlite3
 import tempfile
 import zlib
+import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Literal, Mapping, Sequence
 
 from worldline.run import write_json
-from worldline.media import hydrate_media
+from worldline.media import hydrate_media, MediaStore
 from worldline.adapters.atif import atif_messages
 
 ExportFormat = Literal["sft", "preference", "rl"]
+
+
+def canonical_split(value):
+    if not isinstance(value, str):
+        return "unspecified"
+    value = value.strip().lower().replace("-", "_")
+    return {
+        "dev": "validation",
+        "development": "validation",
+        "val": "validation",
+        "eval": "evaluation",
+        "heldout": "held_out",
+        "unknown": "unspecified",
+    }.get(value, value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,7 +86,13 @@ def _trajectory_path(result: Mapping[str, Any]) -> Path | None:
     return None
 
 
-def iter_episodes(inputs: Sequence[Path], stats: dict[str, int]) -> Iterator[Episode]:
+def iter_episodes(
+    inputs: Sequence[Path],
+    stats: dict[str, int],
+    *,
+    media_store: MediaStore | None = None,
+    allow_unspecified_split=False,
+) -> Iterator[Episode]:
     stats.update(
         {
             "results": 0,
@@ -84,6 +105,8 @@ def iter_episodes(inputs: Sequence[Path], stats: dict[str, int]) -> Iterator[Epi
             "superseded": 0,
             "duplicates": 0,
             "invalid_trajectory": 0,
+            "undeclared_split": 0,
+            "conflicting_split": 0,
         }
     )
     seen = set()
@@ -111,9 +134,25 @@ def iter_episodes(inputs: Sequence[Path], stats: dict[str, int]) -> Iterator[Epi
             **(task.get("metadata") or {}),
             **(result.get("task_metadata") or {}),
         }
-        declared_split = task.get("split", metadata.get("split", "unspecified"))
+        declarations = {
+            canonical_split(value)
+            for value in (
+                task.get("split"),
+                (run.get("metadata") or {}).get("split"),
+                (task.get("metadata") or {}).get("split"),
+                (result.get("task_metadata") or {}).get("split"),
+            )
+        }
+        declarations.discard("unspecified")
+        if len(declarations) > 1:
+            stats["conflicting_split"] += 1
+            continue
+        declared_split = next(iter(declarations), "unspecified")
         if declared_split in {"test", "evaluation", "held_out"}:
             stats["held_out"] += 1
+            continue
+        if declared_split not in {"train", "validation"} and not allow_unspecified_split:
+            stats["undeclared_split"] += 1
             continue
         trajectory_path = _trajectory_path(result)
         if trajectory_path is None:
@@ -122,10 +161,18 @@ def iter_episodes(inputs: Sequence[Path], stats: dict[str, int]) -> Iterator[Epi
         trajectory = _load_object(trajectory_path)
         try:
             if trajectory.get("schema_version") in {"worldline.messages/0.1", "worldline.messages/0.2"}:
-                messages = tuple(hydrate_media(trajectory.get("messages") or [], Path(result["source"])))
+                raw_messages = trajectory.get("messages") or []
+                messages = tuple(
+                    media_store.import_references(raw_messages, Path(result["source"]))
+                    if media_store
+                    else hydrate_media(raw_messages, Path(result["source"]))
+                )
             else:
                 messages = atif_messages(
-                    trajectory, artifact_root=Path(result["source"]), trajectory_path=trajectory_path
+                    trajectory,
+                    artifact_root=Path(result["source"]),
+                    trajectory_path=trajectory_path,
+                    media_store=media_store,
                 )
             if any(
                 not isinstance(message, dict) or message.get("role") not in {"system", "user", "assistant", "tool"}
@@ -162,9 +209,9 @@ def iter_episodes(inputs: Sequence[Path], stats: dict[str, int]) -> Iterator[Epi
         )
 
 
-def load_episodes(inputs: Sequence[Path]) -> tuple[list[Episode], dict[str, int]]:
+def load_episodes(inputs: Sequence[Path], *, allow_unspecified_split=False) -> tuple[list[Episode], dict[str, int]]:
     stats: dict[str, int] = {}
-    return list(iter_episodes(inputs, stats)), stats
+    return list(iter_episodes(inputs, stats, allow_unspecified_split=allow_unspecified_split)), stats
 
 
 def _sft(episodes: Iterable[Episode], include_failures: bool) -> Iterator[dict[str, Any]]:
@@ -218,7 +265,15 @@ class PreferenceSpool:
 
     def add(self, episode: Episode):
         prompt = tuple(itertools.takewhile(lambda m: m.get("role") != "assistant", episode.messages))
-        key = (episode.task_id, episode.task_version, episode.seed, episode.comparison_key, prompt)
+        key = (
+            episode.task_id,
+            episode.task_version,
+            episode.seed,
+            episode.comparison_key,
+            episode.split,
+            episode.split_group,
+            prompt,
+        )
         digest = hashlib.sha256(json.dumps(key, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         value = zlib.compress(json.dumps(asdict(episode), ensure_ascii=False).encode())
         self.db.execute("INSERT INTO episodes VALUES (?, ?, ?, ?)", (digest, episode.id, episode.outcome, value))
@@ -263,7 +318,14 @@ class PreferenceSpool:
 
 
 def export_datasets(
-    inputs: Sequence[Path], outputs: Mapping[str, Path], *, include_failures=False, max_pairs_per_task=50
+    inputs: Sequence[Path],
+    outputs: Mapping[str, Path],
+    *,
+    include_failures=False,
+    max_pairs_per_task=50,
+    media_mode: str = "inline",
+    media_root: Path | None = None,
+    allow_unspecified_split=False,
 ) -> dict[str, dict[str, Any]]:
     """Read each trajectory once and publish requested views after completion."""
     if not outputs or any(name not in {"sft", "rl", "preference"} for name in outputs):
@@ -271,6 +333,11 @@ def export_datasets(
     if max_pairs_per_task < 1:
         raise ValueError("max_pairs_per_task must be positive")
     outputs = {name: path.resolve() for name, path in outputs.items()}
+    if media_mode not in {"inline", "reference"}:
+        raise ValueError("media_mode must be inline or reference")
+    store = MediaStore(media_root or next(iter(outputs.values())).parent) if media_mode == "reference" else None
+    if store and any(not path.is_relative_to(store.root) for path in outputs.values()):
+        raise ValueError("reference dataset outputs must be inside their media_root")
     counts = {name: 0 for name in outputs}
     stats: dict[str, int] = {}
     streams, temporary = {}, {}
@@ -290,7 +357,9 @@ def export_datasets(
                 )
                 counts[name] += 1
 
-            for episode in iter_episodes(inputs, stats):
+            for episode in iter_episodes(
+                inputs, stats, media_store=store, allow_unspecified_split=allow_unspecified_split
+            ):
                 if "sft" in outputs:
                     for record in _sft([episode], include_failures):
                         append("sft", record)
@@ -319,8 +388,18 @@ def export_datasets(
             "records": counts[name],
             "inputs": [str(path.resolve()) for path in inputs],
             "load_stats": stats,
-            "options": {"include_failures": include_failures, "max_pairs_per_task": max_pairs_per_task},
+            "options": {
+                "include_failures": include_failures,
+                "max_pairs_per_task": max_pairs_per_task,
+                "allow_unspecified_split": allow_unspecified_split,
+            },
             "pipeline": "single-pass-streaming-with-disk-pairing",
+            "media": {
+                "mode": media_mode,
+                "root": os.path.relpath(store.root, output.parent) if store else None,
+                "files": store.files_written if store else 0,
+                "bytes": store.bytes_written if store else 0,
+            },
         }
         write_json(output.with_suffix(output.suffix + ".manifest.json"), manifest)
         manifests[name] = manifest
@@ -328,10 +407,24 @@ def export_datasets(
 
 
 def export_dataset(
-    inputs: Sequence[Path], output: Path, *, format: ExportFormat, include_failures=False, max_pairs_per_task=50
+    inputs: Sequence[Path],
+    output: Path,
+    *,
+    format: ExportFormat,
+    include_failures=False,
+    max_pairs_per_task=50,
+    media_mode: str = "inline",
+    media_root: Path | None = None,
+    allow_unspecified_split=False,
 ) -> dict[str, Any]:
     return export_datasets(
-        inputs, {format: output}, include_failures=include_failures, max_pairs_per_task=max_pairs_per_task
+        inputs,
+        {format: output},
+        include_failures=include_failures,
+        max_pairs_per_task=max_pairs_per_task,
+        media_mode=media_mode,
+        media_root=media_root,
+        allow_unspecified_split=allow_unspecified_split,
     )[format]
 
 
@@ -346,16 +439,48 @@ def _record_task_id(record: Mapping[str, Any]) -> str | None:
 
 
 def _record_group(record: Mapping[str, Any]) -> str | None:
-    return record.get("split_group") or (record.get("metadata") or {}).get("split_group") or _record_task_id(record)
+    metadata = _record_metadata(record)
+    if (
+        record.get("split_group") is not None
+        and metadata.get("split_group") is not None
+        and record["split_group"] != metadata["split_group"]
+    ):
+        raise ValueError("record contains conflicting split_group fields")
+    group = record.get("split_group", metadata.get("split_group"))
+    if group is None:
+        return _record_task_id(record)
+    if not isinstance(group, str) or not group:
+        raise ValueError("split_group must be a non-empty string")
+    return group
+
+
+def _record_metadata(record):
+    metadata = record.get("metadata")
+    if metadata is None:
+        return {}
+    if not isinstance(metadata, dict):
+        raise ValueError("record metadata must be an object")
+    return metadata
 
 
 def _record_split(record: Mapping[str, Any]) -> str:
-    return record.get("split") or (record.get("metadata") or {}).get("split") or "unspecified"
+    metadata = _record_metadata(record)
+    values = {canonical_split(value) for value in (record.get("split"), metadata.get("split"))}
+    values.discard("unspecified")
+    if len(values) > 1:
+        raise ValueError("record contains conflicting split fields")
+    return next(iter(values), "unspecified")
 
 
-def _jsonl(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
-    with path.open(encoding="utf-8") as stream:
-        for line_number, line in enumerate(stream, start=1):
+def _jsonl(path: Path, *, max_record_bytes=64 * 1024 * 1024) -> Iterator[tuple[int, dict[str, Any]]]:
+    if type(max_record_bytes) is not int or max_record_bytes < 1:
+        raise ValueError("JSONL record budget must be a positive integer")
+    with path.open("rb") as stream:
+        line_number = 0
+        while line := stream.readline(max_record_bytes + 1):
+            line_number += 1
+            if len(line) > max_record_bytes:
+                raise ValueError(f"{path}:{line_number}: JSONL record exceeds configured byte budget")
             if not line.strip():
                 continue
             value = json.loads(
@@ -429,11 +554,16 @@ def split_dataset(
         "records": counts,
         "tasks": {name: sum(split == name for split in tasks.values()) for name in names},
     }
+    source_manifest = _load_object(input_path.with_suffix(input_path.suffix + ".manifest.json"))
+    media = source_manifest.get("media") or {}
+    if media.get("mode") == "reference":
+        artifact_root = (input_path.parent / media["root"]).resolve()
+        manifest["media"] = {**media, "root": os.path.relpath(artifact_root, output_dir)}
     write_json(output_dir / "split.manifest.json", manifest)
     return manifest
 
 
-def validate_datasets(paths: Sequence[Path]) -> dict[str, Any]:
+def validate_datasets(paths: Sequence[Path], *, max_record_bytes=64 * 1024 * 1024) -> dict[str, Any]:
     errors: list[str] = []
     seen_ids: dict[str, str] = {}
     tasks_by_file: dict[str, set[str]] = {}
@@ -445,8 +575,9 @@ def validate_datasets(paths: Sequence[Path]) -> dict[str, Any]:
         groups: set[str] = set()
         count = 0
         try:
-            for line_number, record in _jsonl(path):
+            for line_number, record in _jsonl(path, max_record_bytes=max_record_bytes):
                 count += 1
+                _record_split(record)
                 record_id = record.get("id")
                 if isinstance(record_id, str):
                     previous = seen_ids.get(record_id)

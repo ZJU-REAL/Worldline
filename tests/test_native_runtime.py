@@ -54,6 +54,12 @@ class NativeTaskTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "duplicate"):
                 environment_plugins()
 
+    def test_all_native_examples_have_valid_manifests(self):
+        for manifest in (EXAMPLE.parents[1]).rglob("worldline.toml"):
+            with self.subTest(path=str(manifest)):
+                definition = load_native_task(manifest.parent)
+                self.assertTrue(definition.task.id)
+
     def test_dry_run_never_starts_an_environment(self):
         with tempfile.TemporaryDirectory() as temp, patch("worldline.runtime.session.ProcessEnvironment") as worker:
             record, path = evaluate_native(

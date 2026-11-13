@@ -10,6 +10,7 @@ Worldline is an independent framework for evaluating, distilling and training st
 - Read `README.md`, `docs/worldline/architecture.md` and `CONTRIBUTING.md` before changing the platform.
 - Run `python3 -m unittest discover -s tests -v` with Python 3.12+, then `ruff check worldline tests` and `ruff format --check worldline tests`.
 - Record task/environment/harness versions, seeds, effective budgets, data splits and trusted verdicts. Never retry an agent failure as infrastructure or train on held-out traces.
+- Use the repository's configured human commit identity. Do not add AI/bot authors or AI `Co-authored-by` trailers.
 
 EFE is a pinned external Git submodule at `third_party/embodied-first-exam/`, not Worldline source.
 Preserve its internal layout and task DIGESTs. For work inside that checkout, read its own

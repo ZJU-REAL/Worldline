@@ -21,7 +21,7 @@ from worldline.report import write_report
 from worldline.adapters.rua.catalog import catalog_task_paths, catalog_task_metadata, write_catalog
 from worldline.learning.launch import train
 from worldline.learning.handoff import export_handoff
-from worldline.diagnostics import profile_trace
+from worldline.diagnostics import profile_trace, profile_dataset
 from worldline.plugins import environment_plugins
 from worldline.runtime.batch import evaluate_many_native
 from worldline.runtime.queue import batch_status, request_stop
@@ -56,6 +56,12 @@ def _build_parser() -> argparse.ArgumentParser:
     export_parser.add_argument("--output", "-o", type=Path, required=True)
     export_parser.add_argument("--include-failures", action="store_true")
     export_parser.add_argument("--max-pairs-per-task", type=int, default=50)
+    export_parser.add_argument("--media-mode", choices=("inline", "reference"), default="inline")
+    export_parser.add_argument(
+        "--allow-unspecified-split",
+        action="store_true",
+        help="Include historical data whose training eligibility you have reviewed",
+    )
 
     report_parser = commands.add_parser("report", help="Summarize normalized evaluation results")
     report_parser.add_argument("inputs", type=Path, nargs="+")
@@ -70,6 +76,8 @@ def _build_parser() -> argparse.ArgumentParser:
     batch_parser.add_argument("--harbor-arg", action="append", default=[])
     batch_parser.add_argument("--max-workers", type=int, default=1)
     batch_parser.add_argument("--dry-run", action="store_true")
+    batch_parser.add_argument("--batch-id")
+    batch_parser.add_argument("--resume", action="store_true")
 
     split_parser = commands.add_parser("split", help="Split a dataset without leaking tasks across partitions")
     split_parser.add_argument("input", type=Path)
@@ -100,6 +108,8 @@ def _build_parser() -> argparse.ArgumentParser:
     distill_parser.add_argument("--seed", default="worldline-v1")
     distill_parser.add_argument("--include-failures-in-sft", action="store_true")
     distill_parser.add_argument("--max-pairs-per-task", type=int, default=50)
+    distill_parser.add_argument("--media-mode", choices=("inline", "reference"), default="reference")
+    distill_parser.add_argument("--allow-unspecified-split", action="store_true")
 
     commands.add_parser("plugins", help="List available environment plugins without importing simulators")
     rollout = commands.add_parser("rollout", help="Evaluate native tasks through a registered environment")
@@ -117,6 +127,9 @@ def _build_parser() -> argparse.ArgumentParser:
     rollout.add_argument("--resume", action="store_true")
     rollout.add_argument("--max-infra-retries", type=int, choices=(0, 1), default=1)
     rollout.add_argument("--model-retries", type=int, default=2)
+    rollout.add_argument(
+        "--context-images", type=int, help="Keep only the newest N images in model requests; retain all trace images"
+    )
     rollout.add_argument("--harness-version", default="native-tools/0.2")
     rollout.add_argument("--cpu-budget", type=int)
     rollout.add_argument("--gpu-devices", default="")
@@ -135,10 +148,21 @@ def _build_parser() -> argparse.ArgumentParser:
     handoff.add_argument("--output-dir", type=Path, required=True)
     handoff.add_argument("--model", default="REPLACE_WITH_MODEL")
     handoff.add_argument("--template", default="qwen")
+    handoff.add_argument("--media-root", type=Path)
+    handoff.add_argument("--parquet-batch-mb", type=int, default=8)
+    handoff.add_argument("--max-record-mb", type=int, default=64)
+    handoff.add_argument("--max-episode-media-mb", type=int, default=64)
     profile = commands.add_parser("profile-trace", help="Measure trace/media storage with a reproducible fixture")
     profile.add_argument("--output-dir", type=Path, required=True)
     profile.add_argument("--events", type=int, default=100)
     profile.add_argument("--unique-images", type=int, default=1)
+    data_profile = commands.add_parser(
+        "profile-data", help="Measure export memory/storage with temporary valid PNG fixtures"
+    )
+    data_profile.add_argument("--output-dir", type=Path, required=True)
+    data_profile.add_argument("--frames", type=int, default=50)
+    data_profile.add_argument("--unique-images", type=int, default=10)
+    data_profile.add_argument("--image-size", type=int, default=256)
 
     catalog = commands.add_parser("rua-catalog", help="Index existing RUA/EFE task packages without copying them")
     catalog.add_argument("root", type=Path)
@@ -155,6 +179,8 @@ def _build_parser() -> argparse.ArgumentParser:
     eval_catalog.add_argument("--max-workers", type=int, default=1)
     eval_catalog.add_argument("--harbor-executable", default="harbor")
     eval_catalog.add_argument("--dry-run", action="store_true")
+    eval_catalog.add_argument("--batch-id")
+    eval_catalog.add_argument("--resume", action="store_true")
 
     training = commands.add_parser("train", help="Validate inputs and run an independent training backend")
     training.add_argument("config", type=Path)
@@ -205,6 +231,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 base_url=args.base_url,
                 api_key_env=args.api_key_env,
                 max_retries=args.model_retries,
+                max_context_images=args.context_images,
             )
         else:
             from worldline.domains.rua.reference import ReachReferenceAgent
@@ -227,6 +254,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "base_url": args.base_url,
                 "api_key_env": args.api_key_env,
                 "model_retries": args.model_retries,
+                "max_context_images": args.context_images,
             }
             if args.agent == "openai-compatible"
             else {"policy": args.agent},
@@ -254,6 +282,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 validation_file=args.validation_file,
                 model=args.model,
                 template=args.template,
+                media_root=args.media_root,
+                parquet_batch_bytes=args.parquet_batch_mb * 1024 * 1024,
+                max_record_bytes=args.max_record_mb * 1024 * 1024,
+                max_media_bytes=args.max_episode_media_mb * 1024 * 1024,
             )
         except (ValueError, OSError, KeyError) as error:
             parser.error("\n".join([str(error), *getattr(error, "__notes__", [])]))
@@ -262,6 +294,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "profile-trace":
         report = profile_trace(args.output_dir, events=args.events, unique_images=args.unique_images)
         print(json.dumps(report, indent=2))
+        return 0
+    if args.command == "profile-data":
+        result = profile_dataset(
+            args.output_dir, frames=args.frames, unique_images=args.unique_images, image_size=args.image_size
+        )
+        print(json.dumps(result, indent=2))
         return 0
     if args.command == "rua-catalog":
         data = write_catalog(args.root, args.output, mode=args.mode, split=args.split, benchmark=args.benchmark)
@@ -277,9 +315,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             executable=args.harbor_executable,
             dry_run=args.dry_run,
             task_metadata=catalog_task_metadata(args.catalog),
+            batch_id=args.batch_id,
+            resume=args.resume,
         )
         print(json.dumps(manifest, ensure_ascii=False, indent=2))
-        return 2 if any(manifest["statuses"].get(key) for key in ("error", "infra_error")) else 0
+        return (
+            2
+            if any(manifest["statuses"].get(key) for key in ("error", "infra_error", "orphaned", "pending", "failed"))
+            else 0
+        )
     if args.command == "train":
         try:
             manifest, path = train(args.config, dry_run=args.dry_run)
@@ -307,7 +351,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 indent=2,
             )
         )
-        return record.exit_code or 0
+        return 2 if record.status == "infra_error" else record.exit_code or 0
     if args.command == "ingest":
         result, run_dir = ingest_harbor_trial(args.trial_dir, args.runs_dir, task_dir=args.task_dir)
         print(
@@ -330,6 +374,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             format=args.format,
             include_failures=args.include_failures,
             max_pairs_per_task=args.max_pairs_per_task,
+            media_mode=args.media_mode,
+            allow_unspecified_split=args.allow_unspecified_split,
         )
         print(json.dumps(manifest, ensure_ascii=False, indent=2))
         return 0
@@ -347,9 +393,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             extra_args=args.harbor_arg,
             dry_run=args.dry_run,
             max_workers=args.max_workers,
+            batch_id=args.batch_id,
+            resume=args.resume,
         )
         print(json.dumps({key: manifest[key] for key in ("tasks", "statuses")}, ensure_ascii=False, indent=2))
-        return 1 if manifest["statuses"].get("error") else 0
+        return (
+            1
+            if any(
+                manifest["statuses"].get(status) for status in ("error", "infra_error", "orphaned", "pending", "failed")
+            )
+            else 0
+        )
     if args.command == "split":
         manifest = split_dataset(
             args.input,
@@ -394,6 +448,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             seed=args.seed,
             include_failures_in_sft=args.include_failures_in_sft,
             max_pairs_per_task=args.max_pairs_per_task,
+            media_mode=args.media_mode,
+            allow_unspecified_split=args.allow_unspecified_split,
         )
         print(
             json.dumps(

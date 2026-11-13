@@ -6,7 +6,7 @@ import base64
 import hashlib
 from pathlib import Path
 from typing import Any
-from worldline.storage import publish_bytes
+from worldline.storage import publish_bytes, publish_file, file_sha256
 
 MARKER = "__worldline_media__"
 EXTENSIONS = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
@@ -17,6 +17,40 @@ class MediaStore:
         self.root = root.resolve()
         self.files_written = 0
         self.bytes_written = 0
+        self.imported = set()
+
+    def import_file(self, path: Path, mime_type: str, encoding: str, *, sha256: str | None = None) -> dict:
+        digest = sha256 or file_sha256(path)
+        if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+            raise ValueError("invalid media digest")
+        if encoding not in {"data_url", "base64"}:
+            raise ValueError("unsupported media encoding")
+        relative = Path("media") / (digest + EXTENSIONS.get(mime_type, ".bin"))
+        destination = self.root / relative
+        stat = path.stat()
+        key = (str(path), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, digest)
+        if key not in self.imported:
+            if destination.exists():
+                if file_sha256(path) != digest or file_sha256(destination) != digest:
+                    raise ValueError("media artifact hash mismatch")
+            elif publish_file(path, destination, sha256=digest):
+                self.files_written += 1
+                self.bytes_written += stat.st_size
+            self.imported.add(key)
+        return {MARKER: {"path": str(relative), "sha256": digest, "mime_type": mime_type, "encoding": encoding}}
+
+    def import_references(self, value: Any, origin: Path) -> Any:
+        if isinstance(value, dict):
+            if MARKER in value:
+                description = value[MARKER]
+                path = media_path(value, origin, verify=False)
+                return self.import_file(
+                    path, description["mime_type"], description["encoding"], sha256=description["sha256"]
+                )
+            return {key: self.import_references(nested, origin) for key, nested in value.items()}
+        if isinstance(value, (tuple, list)):
+            return [self.import_references(nested, origin) for nested in value]
+        return self.externalize(value)
 
     def put(self, encoded: str, mime_type: str, encoding: str) -> dict:
         raw = base64.b64decode(encoded, validate=True)
@@ -45,17 +79,27 @@ class MediaStore:
             return [self.externalize(nested) for nested in value]
         return value
 
+    def inventory(self) -> tuple[int, int]:
+        files = list((self.root / "media").glob("*"))
+        files = [path for path in files if path.is_file() and not path.name.startswith(".")]
+        return len(files), sum(path.stat().st_size for path in files)
 
-def media_bytes(reference: dict, root: Path) -> bytes:
+
+def media_path(reference: dict, root: Path, *, verify: bool = True) -> Path:
     description = reference[MARKER]
     root = root.resolve()
     path = (root / description["path"]).resolve(strict=True)
     if not path.is_relative_to(root):
         raise ValueError("media path escapes trusted artifact root")
-    raw = path.read_bytes()
-    if hashlib.sha256(raw).hexdigest() != description["sha256"]:
+    if not path.is_file():
+        raise ValueError("media reference is not a file")
+    if verify and file_sha256(path) != description["sha256"]:
         raise ValueError("media artifact hash mismatch")
-    return raw
+    return path
+
+
+def media_bytes(reference: dict, root: Path) -> bytes:
+    return media_path(reference, root).read_bytes()
 
 
 def hydrate_media(value: Any, root: Path) -> Any:
@@ -72,3 +116,48 @@ def hydrate_media(value: Any, root: Path) -> Any:
     if isinstance(value, list):
         return [hydrate_media(nested, root) for nested in value]
     return value
+
+
+def model_context(messages, *, root: Path | None = None, max_images: int | None = None):
+    """Hydrate only retained visual inputs; keep all text/tool message ordering."""
+    if max_images is not None and (type(max_images) is not int or max_images < 0):
+        raise ValueError("context image budget must be a nonnegative integer")
+    remaining = max_images
+    selected = []
+    for message in reversed(messages):
+        value = dict(message)
+        if isinstance(value.get("content"), list):
+            parts = []
+            for part in reversed(value["content"]):
+                if part.get("type") == "image_url" and remaining is not None:
+                    if remaining == 0:
+                        parts.append(
+                            {"type": "text", "text": "Earlier image omitted by the configured context image budget."}
+                        )
+                        continue
+                    remaining -= 1
+                parts.append(part)
+            value["content"] = list(reversed(parts))
+        selected.append(value)
+    result = list(reversed(selected))
+    return hydrate_media(result, root) if root is not None else result
+
+
+class MessageHistory(list):
+    """Append-compatible history that retains binary references between model calls."""
+
+    def __init__(self, media: MediaStore):
+        super().__init__()
+        self.media = media
+
+    def append(self, message):
+        super().append(self.media.externalize(message))
+
+    def extend(self, messages):
+        super().extend(self.media.externalize(messages))
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, self.media.externalize(value))
+
+    def model_context(self, max_images=None):
+        return model_context(self, root=self.media.root, max_images=max_images)

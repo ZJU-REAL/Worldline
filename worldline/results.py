@@ -78,7 +78,10 @@ def _numbers(values: Mapping[str, Any], *, exclude: set[str] | None = None) -> d
     return {
         key: float(value)
         for key, value in values.items()
-        if key not in excluded and isinstance(value, (int, float)) and not isinstance(value, bool)
+        if key not in excluded
+        and isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
     }
 
 

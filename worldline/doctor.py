@@ -37,6 +37,12 @@ def doctor(root: Path | None = None) -> dict[str, Any]:
     engine = docker or podman
     container = _probe([engine, "info"]) if engine else {"ok": False, "detail": "no container engine installed"}
     compose = _probe([engine, "compose", "version"]) if engine else {"ok": False, "detail": "no compose installed"}
+    gpu = (
+        _probe([nvidia, "--query-gpu=index,name", "--format=csv,noheader"])
+        if nvidia
+        else {"ok": False, "detail": "no NVIDIA tools installed"}
+    )
+    gpu["ok"] = gpu["ok"] and bool(gpu.get("detail", "").strip())
     try:
         efe = {"ok": True, **checkout_info(start=root)}
     except ValueError as error:
@@ -51,7 +57,7 @@ def doctor(root: Path | None = None) -> dict[str, Any]:
         },
         "container": {**container, "docker": docker, "podman": podman},
         "compose": compose,
-        "nvidia": {"ok": nvidia is not None, "path": nvidia},
+        "nvidia": {**gpu, "path": nvidia},
         "repository": {"ok": (root / "worldline").is_dir(), "root": str(root)},
         "efe": efe,
     }
@@ -71,7 +77,7 @@ def doctor(root: Path | None = None) -> dict[str, Any]:
         recommendations.append("Harbor tasks: install worldline-agent[harbor] in the runner environment.")
     if not container["ok"] or not compose["ok"]:
         recommendations.append("Harbor tasks: make Docker/Podman daemon and Compose accessible to this user.")
-    if not nvidia:
+    if not checks["nvidia"]["ok"]:
         recommendations.append("GPU tasks: install NVIDIA drivers and the container runtime integration.")
     return {
         "schema_version": "worldline.doctor/0.2",

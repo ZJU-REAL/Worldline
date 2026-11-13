@@ -1,6 +1,6 @@
 [project]
 name = "worldline-agent"
-version = "0.3.0"
+version = "0.4.0"
 description = "Unified evaluation, distillation, and training for sandboxed agents"
 readme = "README.md"
 license = "MIT"
@@ -31,7 +31,7 @@ build-backend = "hatchling.build"
 packages = ["worldline"]
 
 [tool.hatch.build.targets.sdist]
-only-include = ["worldline", "examples", "tests", "docs/worldline", "LICENSE", "README.md", "CONTRIBUTING.md"]
+only-include = ["worldline", "examples", "tests", "docs/worldline", ".githooks", "AGENTS.md", "LICENSE", "README.md", "CONTRIBUTING.md"]
 
 [tool.ruff]
 line-length = 120

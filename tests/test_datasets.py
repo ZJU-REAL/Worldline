@@ -37,6 +37,7 @@ def make_result(root: Path, name: str, task: str, outcome: str, reward: float) -
         "task_id": task,
         "outcome": outcome,
         "reward": reward,
+        "task_metadata": {"split": "train", "seed": 0},
         "metrics": {"progress": reward},
         "usage": {"n_input_tokens": 10},
         "source": str(trial),

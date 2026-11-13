@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import math
 import os
-import sqlite3
 import threading
 import time
 import uuid
@@ -16,6 +14,7 @@ from pathlib import Path
 
 from worldline import __version__
 from worldline.runtime.resources import ResourcePool
+from worldline.runtime.state import DurableQueue
 from worldline.runtime.queue import snapshot_batch, validate_batch_id
 from worldline.plugins import get_environment_plugin
 from worldline.run import write_json
@@ -46,20 +45,6 @@ def evaluate_many_native(
     batch_id = batch_id or f"native-{uuid.uuid4().hex}"
     validate_batch_id(batch_id)
     directory = runs_dir.resolve() / "batches" / batch_id
-    directory.mkdir(parents=True, exist_ok=True)
-    lock = (directory / "owner.lock").open("a")
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        lock.close()
-        raise ValueError("batch is already owned by another runner") from None
-    db = sqlite3.connect(directory / "state.sqlite", check_same_thread=False)
-    mutex = threading.Lock()
-    db.execute("PRAGMA journal_mode=WAL")
-    db.execute("PRAGMA synchronous=FULL")
-    db.execute("CREATE TABLE IF NOT EXISTS control (key TEXT PRIMARY KEY, value TEXT)")
-    db.execute("CREATE TABLE IF NOT EXISTS meta (signature TEXT)")
-    db.execute("CREATE TABLE IF NOT EXISTS jobs (ordinal INTEGER PRIMARY KEY, path TEXT, status TEXT, result TEXT)")
     tasks = [Path(path).resolve() for path in task_dirs]
     identities = []
     for path in tasks:
@@ -83,13 +68,10 @@ def evaluate_many_native(
             sort_keys=True,
         ).encode()
     ).hexdigest()
+    state = DurableQueue(directory)
+    db, mutex = state.db, state.mutex
     try:
-        previous = db.execute("SELECT signature FROM meta").fetchone()
-        if previous:
-            if not resume:
-                raise ValueError("batch already exists; use resume or a new batch_id")
-            if previous[0] != signature:
-                raise ValueError("resume configuration/task version differs from the recorded batch")
+        if state.initialize(tasks, signature, resume):
             for status, saved in db.execute(
                 "SELECT status, result FROM jobs WHERE status IN ('completed', 'infra_error', 'planned')"
             ):
@@ -113,36 +95,14 @@ def evaluate_many_native(
                         f"completed batch artifact missing or invalid: {final_path}; restore artifacts before resume"
                     )
             db.execute("UPDATE jobs SET status='pending' WHERE status IN ('running', 'blocked')")
-        else:
-            if resume:
-                raise ValueError("batch does not exist to resume")
-            db.execute("INSERT INTO meta VALUES (?)", (signature,))
-            db.executemany("INSERT INTO jobs VALUES (?, ?, 'pending', NULL)", enumerate(str(path) for path in tasks))
-        db.execute("INSERT OR REPLACE INTO control VALUES ('stop_requested', '0')")
-        db.commit()
+        state.reset_stop()
         resources = ResourcePool(cpu_budget if cpu_budget is not None else os.cpu_count() or 1, gpu_devices)
         if resources.capacity < 1:
             raise ValueError("cpu_budget must be positive")
         provider_blocked = threading.Event()
         preflights = {}
 
-        def claim():
-            with mutex:
-                stop = db.execute("SELECT value FROM control WHERE key='stop_requested'").fetchone()
-                if stop and stop[0] == "1":
-                    return None
-                row = db.execute(
-                    "SELECT ordinal, path, result FROM jobs WHERE status='pending' ORDER BY ordinal LIMIT 1"
-                ).fetchone()
-                if row:
-                    db.execute("UPDATE jobs SET status='running' WHERE ordinal=?", (row[0],))
-                    db.commit()
-                return row
-
-        def save(ordinal, row, status="running"):
-            with mutex:
-                db.execute("UPDATE jobs SET status=?, result=? WHERE ordinal=?", (status, json.dumps(row), ordinal))
-                db.commit()
+        claim, save = state.claim, state.save
 
         def worker():
             while job := claim():
@@ -270,9 +230,7 @@ def evaluate_many_native(
                 for future in futures:
                     future.result()
             except KeyboardInterrupt:
-                with mutex:
-                    db.execute("INSERT OR REPLACE INTO control VALUES ('stop_requested', '1')")
-                    db.commit()
+                state.stop()
                 # Active trials drain within their own budgets. No new trials
                 # are claimed; pending jobs can resume without consuming retries.
                 raise
@@ -298,6 +256,4 @@ def evaluate_many_native(
         write_json(directory / "manifest.json", manifest)
         return manifest
     finally:
-        db.close()
-        fcntl.flock(lock, fcntl.LOCK_UN)
-        lock.close()
+        state.close()
