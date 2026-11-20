@@ -1,6 +1,6 @@
 # 指定模型并运行评测
 
-Worldline 0.6 的入口是 `worldline run`。输入模型、选择 Harness 和任务，运行器完成
+Worldline 0.7 的入口是 `worldline run`。输入模型、选择 Harness 和任务，运行器完成
 服务 readiness、协议探测、环境 rollout、独立 verifier 评分和报告。`python -m worldline`
 也可以使用同一入口。旧的 `rollout`、`eval`、`experiment` 保留。
 
@@ -13,9 +13,9 @@ worldline run --model your-served-model --base-url http://localhost:8000/v1 \
   --batch-id first-rua
 ```
 
-默认 `--harness json --suite rua-smoke`：使用 MuJoCo 的 held-out reach 集成任务。
+默认 `--harness codex --suite rua-smoke`：使用 MuJoCo 的 held-out reach 集成任务。
 这是一个真实模拟器任务，但不是完整 RUA benchmark。评测失败也会输出报告；模型不需要
-function calling。需要认证时通过环境变量提供凭据：
+function calling。Codex 需 Linux、Docker 和 CLI 0.162+，接入见 [Codex 指南](codex.md)；无需 Codex 时显式使用 `--harness json`。需要认证时通过环境变量提供凭据：
 
 ```bash
 export WORLDLINE_API_KEY='your-key'
@@ -57,9 +57,10 @@ worldline run --model MODEL --base-url URL --tasks /path/to/native/task1 /path/t
 
 | Harness | 模型接口 | 环境执行 | 使用范围 |
 | --- | --- | --- | --- |
-| `json`（默认） | Chat Completions 文本/图像 | 原生公开工具 | chat 模型，不要求 function calling |
+| `json` | Chat Completions 文本/图像 | 原生公开工具 | chat 模型，不要求 function calling |
 | `tools` | Chat Completions + function calling | 原生公开工具 | 支持工具调用的模型 |
-| `codex` | Responses | Harbor 的原生 Codex agent | Harbor/EFE 任务，容器内执行代码 |
+| `codex`（默认） | Chat Completions 或 Responses | 独立 Codex 容器 + HTTP MCP | 原生 RUA/CUA 公开工具任务 |
+| `harbor:codex` | Responses | Harbor 的原生 Codex agent | Harbor/EFE 任务，容器内执行代码 |
 | `harbor:<agent>` | 对应上游 agent 的协议 | Harbor | 其他 Harbor agent |
 | 已安装插件名 | 插件声明的协议 | native 或 Harbor | 团队自己的 Harness |
 
@@ -75,14 +76,14 @@ Codex 示例：
 ```bash
 uv pip install 'worldline-agent[harbor]'
 worldline run --model served-alias --base-url https://responses-service.example/v1 \
-  --harness codex --tasks /path/to/harbor-task --batch-id codex-rua
+  --harness harbor:codex --tasks /path/to/harbor-task --batch-id codex-rua
 ```
 
-`codex` 自动选择 Responses 协议。服务必须支持该协议，并能从 Harbor 容器访问；主机
+`harbor:codex` 自动选择 Responses 协议。服务必须支持该协议，并能从 Harbor 容器访问；主机
 `localhost` 不能充当容器的模型地址。Harbor 0.23 的 Codex 模型解析需要不含 `/` 的 served
 alias；Hugging Face 源名称可另用 `--served-model-name ALIAS` 指定服务别名。
 运行器通过 Harbor 的 `config_source` 传入 `openai_base_url`，凭据只通过子进程环境传递。
-原生 reach/form 任务使用 `json/tools`；Codex 的代码执行保持在 Harbor 隔离边界内。
+原生 reach/form 任务使用 `codex/json/tools`；完整代码执行保持在 Harbor 隔离边界内。
 正式 EFE 运行继续遵守上游 verifier、网络、预算和 task DIGEST 协议。
 
 ## 可复现配置和资源

@@ -56,7 +56,7 @@ def _completed_resume(directory, runs_dir, batch_id):
 def run_evaluation(
     model_config,
     *,
-    harness="json",
+    harness="codex",
     suite=None,
     tasks=(),
     runs_dir=Path("runs"),
@@ -121,7 +121,7 @@ def run_evaluation(
             )
         if urlparse(model_config.base_url).hostname in {"localhost", "127.0.0.1", "::1"}:
             raise ValueError("Harbor containers cannot use host loopback; supply their reachable model service URL")
-        if harness == "codex" and "/" in (model_config.name or model_config.reference):
+        if plugin.harbor_agent == "codex" and "/" in (model_config.name or model_config.reference):
             raise ValueError("Harbor 0.23 Codex needs a served alias without '/'; pass --served-model-name ALIAS")
         if not dry_run and not shutil.which(harbor_executable):
             raise ValueError(
@@ -130,6 +130,14 @@ def run_evaluation(
     # Fingerprint the stable model identity, never the transient owned server port.
     settings = model_config.identity()
     options = dict(agent_options or {})
+    if plugin.name == "codex" and not dry_run:
+        from worldline.harnesses.codex_image import native_binary
+
+        codex = dict(options.get("codex", {}))
+        codex.setdefault("executable", "codex")
+        binary, version = native_binary(codex["executable"])
+        codex.update(codex_version=version, binary_sha256=file_sha256(binary))
+        options["codex"] = codex
     plan = {
         "schema_version": "worldline.evaluation/0.1",
         "worldline_version": __version__,
@@ -182,6 +190,11 @@ def run_evaluation(
         status = {"status": "starting", "batch_id": batch_id, "plan": str(plan_path)}
         write_json(directory / "result.json", status)
         try:
+            runtime_options = dict(options)
+            if plugin.name == "codex":
+                from worldline.harnesses.codex_image import prepare_image
+
+                runtime_options["codex"] = {**options["codex"], **prepare_image(options["codex"]["executable"])}
             if plugin.backend == "native":
                 check_server(model_config)
                 checked = set()
@@ -200,7 +213,7 @@ def run_evaluation(
                 if plugin.backend == "native":
                     from worldline.runtime.batch import evaluate_many_native
 
-                    factory = partial(plugin.factory, model=service.model, options=options)
+                    factory = partial(plugin.factory, model=service.model, options=runtime_options)
                     manifest = evaluate_many_native(
                         tasks,
                         agent_factory=factory,
@@ -220,7 +233,7 @@ def run_evaluation(
                     from worldline.batch import evaluate_many_harbor
 
                     extra = list(harbor_args)
-                    if harness == "codex":
+                    if plugin.harbor_agent == "codex":
                         # Native Codex configuration is carried by the pinned Harbor adapter.
                         extra += [
                             "--agent-kwarg",
@@ -233,7 +246,7 @@ def run_evaluation(
                     manifest = evaluate_many_harbor(
                         tasks,
                         agent=plugin.harbor_agent,
-                        model="openai/" + service.model.name if harness == "codex" else service.model.name,
+                        model="openai/" + service.model.name if plugin.harbor_agent == "codex" else service.model.name,
                         runs_dir=Path(runs_dir),
                         batch_id=batch_id,
                         resume=resume and (Path(runs_dir) / "batches" / batch_id / "state.sqlite").exists(),

@@ -16,13 +16,18 @@ from pathlib import Path
 from unittest.mock import patch
 
 from worldline.cli import main
-from worldline.evaluation import run_evaluation
+from worldline.evaluation import run_evaluation as platform_run_evaluation
 from worldline.harnesses import HarnessPlugin, harness_plugins
 from worldline.harnesses.json_agent import JSONActionAgent, parse_action
 from worldline.models.config import ModelConfig
 from worldline.models.serving import ModelService, probe_model
 from worldline.errors import BudgetExceeded, InvalidAction
 from worldline.contracts import Task
+
+
+def run_evaluation(*args, **kwargs):
+    kwargs.setdefault("harness", "json")
+    return platform_run_evaluation(*args, **kwargs)
 
 
 @contextlib.contextmanager
@@ -67,17 +72,18 @@ class ModelEntryTest(unittest.TestCase):
             self.assertEqual(main(["run", "--model", "org/open-model", "--runs-dir", root, "--dry-run"]), 0)
             result = json.loads(output.getvalue())
             self.assertEqual(result["status"], "planned")
-            self.assertEqual(result["harness"], "json")
+            self.assertEqual(result["harness"], "codex")
             self.assertEqual(result["model"]["backend"], "vllm")
             self.assertEqual(result["tasks"][0]["split"], "test")
 
     def test_harness_protocol_and_task_mismatch_fail_before_serving(self):
         with patch("worldline.evaluation.ModelService") as service:
             with self.assertRaisesRegex(ValueError, "requires"):
-                run_evaluation(ModelConfig("model", base_url="https://service.invalid/v1"), harness="codex")
+                run_evaluation(ModelConfig("model", base_url="https://service.invalid/v1"), harness="harbor:codex")
             with self.assertRaisesRegex(ValueError, "other task format"):
                 run_evaluation(
-                    ModelConfig("model", base_url="https://service.invalid/v1", protocol="responses"), harness="codex"
+                    ModelConfig("model", base_url="https://service.invalid/v1", protocol="responses"),
+                    harness="harbor:codex",
                 )
             with self.assertRaisesRegex(ValueError, "image-capable"):
                 run_evaluation(ModelConfig("model", base_url="https://service.invalid/v1"), suite="cua-smoke")
@@ -337,7 +343,7 @@ HTTPServer(("127.0.0.1",int(sys.argv[1])),Handler).serve_forever()
                 patch.dict(os.environ, {"WORLDLINE_API_KEY": "private-test-secret"}),
             ):
                 cls.return_value.__enter__.return_value = service
-                run_evaluation(config, harness="codex", tasks=[task], runs_dir=directory / "runs")
+                run_evaluation(config, harness="harbor:codex", tasks=[task], runs_dir=directory / "runs")
             args = run.call_args.kwargs
             self.assertEqual(args["model"], "openai/served-alias")
             self.assertEqual(args["env"]["OPENAI_API_KEY"], "private-test-secret")

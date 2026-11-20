@@ -28,13 +28,19 @@ def _json(**kwargs):
     return create_agent(json_actions=True, **kwargs)
 
 
+def _codex(**kwargs):
+    from worldline.harnesses.codex import CodexAgent
+
+    return CodexAgent(**kwargs)
+
+
 def harness_plugins():
     plugins = {
         p.name: p
         for p in (
             HarnessPlugin("tools", "native-tools/0.3", "native", ("chat",), _tools),
             HarnessPlugin("json", "native-json/0.1", "native", ("chat",), _json),
-            HarnessPlugin("codex", "harbor-codex/0.23.0", "harbor", ("responses",), harbor_agent="codex"),
+            HarnessPlugin("codex", "native-codex-mcp/0.1", "native", ("chat", "responses"), _codex),
         )
     }
     for entry in entry_points(group="worldline.harnesses"):
@@ -60,6 +66,8 @@ def harness_plugins():
 
 def get_harness(name):
     if name.startswith("harbor:") and name.removeprefix("harbor:"):
+        if name == "harbor:codex":
+            return HarnessPlugin(name, "harbor-codex/0.23.0", "harbor", ("responses",), harbor_agent="codex")
         return HarnessPlugin(name, "harbor-agent/0.23.0", "harbor", ("chat", "responses"), harbor_agent=name[7:])
     try:
         return harness_plugins()[name]

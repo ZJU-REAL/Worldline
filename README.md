@@ -4,12 +4,12 @@ Worldline 为需要有状态环境的 Agent 提供评测、教师 rollout、轨�
 
 目前是研发框架，支持本地运行、主机多进程资源协调和可选中央任务 lease。正式机器人 benchmark、桌面 VM、GPU 与真实模型/训练作业的最终验收由部署者在对应资源执行。
 
-0.6 版加入模型评测统一入口：`worldline run` 支持已有模型 endpoint，或自动启动 vLLM/GGUF 服务；Harness 通过插件独立选择，评测自动输出报告并支持恢复。EFE 保持可选上游 submodule。此前供应/训练基础设施见 [0.5 复审](docs/worldline/iteration-05.md)，新入口见 [模型评测](docs/worldline/model-evaluation.md)。
+0.7 版将真实 Codex CLI 接入多种模型和原生环境。`worldline run` 支持已有模型 endpoint，或自动启动 vLLM/GGUF 服务；Harness 独立选择，评测自动输出报告并支持恢复。EFE 保持可选上游 submodule。接入见 [Codex 与多模型](docs/worldline/codex.md) 和 [模型评测](docs/worldline/model-evaluation.md)。
 
 ## 指定模型，运行评测
 
 ```bash
-# 已有推理服务；默认 JSON Harness + RUA reach smoke
+# 已有推理服务；默认 Codex Harness + RUA reach smoke
 worldline run --model MODEL --base-url http://localhost:8000/v1 --batch-id first-rua
 # GPU 环境安装 serving extra 后，自动启动 vLLM 并加载 HF/本地权重
 worldline run --model Qwen/Qwen2.5-7B-Instruct --batch-id openmodel-rua
@@ -17,7 +17,7 @@ worldline run --model Qwen/Qwen2.5-7B-Instruct --batch-id openmodel-rua
 worldline run --model MODEL --base-url URL --harness tools
 ```
 
-默认 smoke 是 held-out 的真实 MuJoCo 集成任务，安装需 `rua` extra；完整 benchmark 使用 `--tasks` 指定外部任务。`codex` 和其他 Harbor Harness 通过容器任务接入，模型服务需支持它们的协议。CPU GGUF、CUA、模型配置、资源分配和插件说明见 [模型评测指南](docs/worldline/model-evaluation.md)。
+默认 smoke 是 held-out 的真实 MuJoCo 集成任务，安装需 `rua` extra。默认 Codex 需要 Linux、Docker 和 CLI 0.162+；普通 Chat Completions 服务即可接入，也可显式选择 `json/tools`。完整 benchmark 使用 `--tasks`；正式 EFE coding 任务使用 `harbor:codex`。CPU GGUF、CUA、资源与插件说明见 [Codex 指南](docs/worldline/codex.md)。
 
 ## 目录和依赖
 

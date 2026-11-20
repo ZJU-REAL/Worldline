@@ -3,6 +3,7 @@
 import argparse
 import json
 import sys
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -25,7 +26,7 @@ def add_commands(commands):
     reference.add_argument("--model", "-m")
     reference.add_argument("--model-config", type=Path)
     run.add_argument(
-        "--harness", default="json", help="json (default), tools, codex, harbor:<agent>, or installed plugin"
+        "--harness", default="codex", help="codex (default), json, tools, harbor:<agent>, or installed plugin"
     )
     selection = run.add_mutually_exclusive_group()
     selection.add_argument("--suite", choices=("rua-smoke", "cua-smoke"))
@@ -62,6 +63,10 @@ def add_commands(commands):
     run.add_argument("--model-request-timeout", type=float, default=120)
     run.add_argument("--harbor-executable", default="harbor")
     run.add_argument("--harbor-arg", action="append", default=[])
+    run.add_argument("--codex-executable", default="codex")
+    run.add_argument("--codex-bridge-host", help="Runner IP reachable from Docker; normally detected automatically")
+    run.add_argument("--codex-decision-mode", choices=("json", "tools"), default="json")
+    run.add_argument("--codex-context-window", type=int, default=32768)
 
 
 def dispatch(args, parser):
@@ -123,6 +128,13 @@ def dispatch(args, parser):
             "endpoint_rpm": args.endpoint_rpm,
             "request_timeout_sec": args.model_request_timeout,
         }
+        if args.harness == "codex":
+            options["codex"] = {
+                "executable": args.codex_executable,
+                "bridge_host": args.codex_bridge_host,
+                "decision_mode": args.codex_decision_mode,
+                "context_window": args.codex_context_window,
+            }
         print(
             f"Worldline: model={model.reference}, backend={model.effective_backend}, Harness={args.harness}",
             file=sys.stderr,
@@ -144,7 +156,7 @@ def dispatch(args, parser):
             harbor_executable=args.harbor_executable,
             harbor_args=args.harbor_arg,
         )
-    except (ValueError, TypeError, OSError) as error:
+    except (ValueError, TypeError, OSError, subprocess.SubprocessError) as error:
         parser.error(str(error))
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result["status"] in {"completed", "planned"} else 1

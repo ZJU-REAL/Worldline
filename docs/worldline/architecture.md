@@ -94,7 +94,15 @@ owned serving 使用 `runtime/command_guard.py` 管理整个进程组。一个�
 来源和 revision，保留 Harness/环境/预算配置。恢复签名继续包含完整模型配置，避免替换模型
 后复用已完成结果。已完成恢复校验 artifact/report hashes，无需重新启动服务。
 
-Codex 通过 Harbor 自有 agent 执行，与原生仅公开工具的 JSON/tools Harness 分开路由。
+0.7 原生 Codex 使用独立 scratch 容器与公开 HTTP MCP；`adapters/codex_responses.py` 单独
+转换 Chat/JSON、Chat function calling 与 Responses，并复用模型请求的限流、用量、预算和
+重试。Codex 运行真实 CLI 的交互循环，只有 MCP dispatcher 执行环境动作。模型凭据留在
+运行器，verifier 不进入此通道，镜像不挂载任何运行器或任务文件。
+
+Container guard 回收 agent，Gateway 关闭时取消并等待模型请求。CLI/image/adapter 身份
+进入 run，canonical messages 保存真实适配提示词。自研 Harness 可以复用相同的模型和
+环境边界。正式 coding tasks 通过 `harbor:codex` 使用 Harbor 自有 agent，与原生公开工具
+实验分别报告。细节见 [Codex 与多模型](codex.md)。
 正式 EFE 任务保持在外部 checkout 和上游隔离协议内。详见 [模型评测](model-evaluation.md)。
 
 ## 0.3 存储与上游边界

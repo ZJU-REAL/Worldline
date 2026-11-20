@@ -175,6 +175,25 @@ class OpenAICompatibleAgent:
     def _tool_request(self) -> dict:
         return {"tools": tools_for(self.spec), "tool_choice": "auto"}
 
+    def _request_body(self, context, tool_request, used):
+        body = {
+            "model": self.model,
+            "messages": context,
+            **tool_request,
+            "stream": False,
+            "max_tokens": min(self.max_output_tokens, self.max_total_tokens - int(used))
+            if self.max_total_tokens
+            else self.max_output_tokens,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+        }
+        if self.sampling_seed is not None:
+            body["seed"] = self.sampling_seed
+        return body
+
+    def _response_message(self, result):
+        return result["choices"][0]["message"]
+
     def _completion(self) -> dict:
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
@@ -196,19 +215,7 @@ class OpenAICompatibleAgent:
         self.emit("model.request_context", {"model": self.model, "messages": context, **tool_request})
         if isinstance(self.messages, MessageHistory):
             context = hydrate_media(context, self.messages.media.root)
-        body = {
-            "model": self.model,
-            "messages": context,
-            **tool_request,
-            "stream": False,
-            "max_tokens": min(self.max_output_tokens, self.max_total_tokens - int(used))
-            if self.max_total_tokens
-            else self.max_output_tokens,
-            "temperature": self.temperature,
-            "top_p": self.top_p,
-        }
-        if self.sampling_seed is not None:
-            body["seed"] = self.sampling_seed
+        body = self._request_body(context, tool_request, used)
         headers = {"Content-Type": "application/json"}
         key = os.environ.get(self.api_key_env)
         if key:
@@ -265,7 +272,11 @@ class OpenAICompatibleAgent:
             if delay >= self.deadline - time.monotonic():
                 raise failure
             self.emit("model.retry", {"attempt": attempt + 1, "error_code": failure.code, "delay_sec": delay})
-            time.sleep(delay)
+            wake = time.monotonic() + delay
+            while time.monotonic() < wake:
+                if self.cancel_check and self.cancel_check():
+                    raise BudgetExceeded("model retry cancelled by its owner")
+                time.sleep(min(0.05, max(0, wake - time.monotonic())))
         if not isinstance(result, dict):
             raise ModelAPIError("model API returned a non-object response", status=422)
         raw_usage = result.get("usage") or {}
@@ -287,7 +298,7 @@ class OpenAICompatibleAgent:
                 raise ModelAPIError("token-budgeted model endpoint must report token usage", status=422)
         self.emit("model.response", {"model": self.model, "usage": safe_usage})
         try:
-            message = result["choices"][0]["message"]
+            message = self._response_message(result)
             if not isinstance(message, dict) or not isinstance(message.get("content"), (str, list, type(None))):
                 raise ValueError("invalid chat message")
             json.dumps(message, allow_nan=False)

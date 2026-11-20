@@ -1,6 +1,6 @@
 [project]
 name = "worldline-agent"
-version = "0.6.0"
+version = "0.7.0"
 description = "Unified evaluation, distillation, and training for sandboxed agents"
 readme = "README.md"
 license = "MIT"
