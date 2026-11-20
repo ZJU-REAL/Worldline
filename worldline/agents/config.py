@@ -25,7 +25,11 @@ def runtime_configuration(agent):
 def comparison_configuration(runtime):
     # Model names are reported separately so models using the same harness and
     # budgets can still be compared and paired on a common configuration.
-    return {**runtime, "settings": {key: value for key, value in runtime["settings"].items() if key != "model"}}
+    return {**runtime, "settings": comparison_settings(runtime["settings"])}
+
+
+def comparison_settings(settings):
+    return {key: value for key, value in settings.items() if key not in {"model", "model_source", "model_revision"}}
 
 
 def factory_configuration(factory):

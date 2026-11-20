@@ -4,7 +4,20 @@ Worldline 为需要有状态环境的 Agent 提供评测、教师 rollout、轨�
 
 目前是研发框架，支持本地运行、主机多进程资源协调和可选中央任务 lease。正式机器人 benchmark、桌面 VM、GPU 与真实模型/训练作业的最终验收由部署者在对应资源执行。
 
-0.5 版加入 owned RUA/OSWorld provider、独占会话身份、主机资源锁、中央 lease、硬 deadline HTTP、完整 interaction context 预算、磁盘数据索引、LF prose/tool 保真 formatter、在线 episode service/verl tool adapter、受控独立 fork 和可执行验收计划。EFE 保持可选上游 submodule。实现和验证边界见 [本轮复审](docs/worldline/iteration-05.md)。
+0.6 版加入模型评测统一入口：`worldline run` 支持已有模型 endpoint，或自动启动 vLLM/GGUF 服务；Harness 通过插件独立选择，评测自动输出报告并支持恢复。EFE 保持可选上游 submodule。此前供应/训练基础设施见 [0.5 复审](docs/worldline/iteration-05.md)，新入口见 [模型评测](docs/worldline/model-evaluation.md)。
+
+## 指定模型，运行评测
+
+```bash
+# 已有推理服务；默认 JSON Harness + RUA reach smoke
+worldline run --model MODEL --base-url http://localhost:8000/v1 --batch-id first-rua
+# GPU 环境安装 serving extra 后，自动启动 vLLM 并加载 HF/本地权重
+worldline run --model Qwen/Qwen2.5-7B-Instruct --batch-id openmodel-rua
+# Harness 独立选择；模型需支持 function calling
+worldline run --model MODEL --base-url URL --harness tools
+```
+
+默认 smoke 是 held-out 的真实 MuJoCo 集成任务，安装需 `rua` extra；完整 benchmark 使用 `--tasks` 指定外部任务。`codex` 和其他 Harbor Harness 通过容器任务接入，模型服务需支持它们的协议。CPU GGUF、CUA、模型配置、资源分配和插件说明见 [模型评测指南](docs/worldline/model-evaluation.md)。
 
 ## 目录和依赖
 
@@ -13,6 +26,7 @@ worldline/
   contracts.py, tasks.py, plugins.py     # 通用契约、任务、插件发现
   runtime/                              # 环境进程、交互 session、状态恢复、批次与资源
   agents/                               # 模型调用、工具 Harness
+  models/, harnesses/, suites/           # 模型配置/服务、Harness 插件、打包集成任务
   domains/rua/, domains/cua/             # 领域实现与动作语义
   adapters/                             # EFE/Harbor、RUA socket、BrowserGym、ATIF
   learning/formats/                     # 公共消息校验、LLaMA-Factory、verl 格式
@@ -60,7 +74,7 @@ worldline rollout examples/cua/form-train examples/cua/form-test \
   -a cua-reference --max-workers 2 --batch-id cua-v1
 ```
 
-参考策略用于检查平台链路。接入模型时使用工具 Agent；模型服务由用户选择的 serving 框架运行：
+参考策略用于检查平台链路。推荐通过上面的 `worldline run` 接入模型；低层 `rollout` 也可直接使用已有服务：
 
 ```bash
 export WORLDLINE_API_KEY='your-key'

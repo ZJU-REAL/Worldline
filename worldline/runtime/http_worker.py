@@ -18,7 +18,13 @@ def main():
         if os.getppid() != parent:
             return 1
     payload = json.loads(sys.stdin.buffer.readline())
-    request = urllib.request.Request(payload["url"], data=payload["body"].encode(), headers=payload["headers"])
+    body = payload.get("body")
+    request = urllib.request.Request(
+        payload["url"],
+        data=body.encode() if body is not None else None,
+        headers=payload["headers"],
+        method=payload.get("method"),
+    )
     try:
         chunks, size = [], 0
         with urllib.request.urlopen(request, timeout=payload["timeout"]) as response:

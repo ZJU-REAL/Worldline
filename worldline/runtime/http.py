@@ -29,8 +29,9 @@ def http_json(request, deadline, max_bytes, cancel_check=None):
             json.dumps(
                 {
                     "url": request.full_url,
+                    "method": request.get_method(),
                     "headers": dict(request.header_items()),
-                    "body": request.data.decode(),
+                    "body": request.data.decode() if request.data is not None else None,
                     "max_bytes": max_bytes,
                     "timeout": max(0.001, deadline - time.monotonic()),
                 },

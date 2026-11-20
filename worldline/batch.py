@@ -36,6 +36,7 @@ def evaluate_many_harbor(
     task_metadata: dict[Path, dict] | None = None,
     batch_id: str | None = None,
     resume: bool = False,
+    env: dict[str, str] | None = None,
 ) -> dict:
     if type(max_workers) is not int or max_workers < 1:
         raise ValueError("max_workers must be a positive integer")
@@ -62,6 +63,7 @@ def evaluate_many_harbor(
                 "args": list(extra_args),
                 "dry_run": dry_run,
                 "task_metadata": metadata,
+                "env_names": sorted((env or {}).keys()),
                 "worldline_version": __version__,
             },
             sort_keys=True,
@@ -120,6 +122,7 @@ def evaluate_many_harbor(
                         dry_run=dry_run,
                         task_metadata=(task_metadata or {}).get(path),
                         on_created=created,
+                        env=env,
                     )
                     row.update(
                         run=asdict(record),

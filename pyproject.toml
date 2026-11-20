@@ -1,6 +1,6 @@
 [project]
 name = "worldline-agent"
-version = "0.5.0"
+version = "0.6.0"
 description = "Unified evaluation, distillation, and training for sandboxed agents"
 readme = "README.md"
 license = "MIT"
@@ -15,6 +15,7 @@ cua = ["browsergym-core==0.14.3"]
 handoff = ["pyarrow>=19,<27", "pillow>=11,<12"]
 training = ["torch>=2.5,<3", "transformers>=4.51,<5", "datasets>=3,<5", "accelerate>=1,<2"]
 dev = ["ruff==0.14.5"]
+serving = ["vllm>=0.11,<1; python_version < '3.14'"]
 
 [project.urls]
 Repository = "https://github.com/ZJU-REAL/Worldline"
@@ -29,6 +30,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["worldline"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"examples/rua/reach-test" = "worldline/suites/tasks/rua/reach-test"
+"examples/cua/form-test" = "worldline/suites/tasks/cua/form-test"
 
 [tool.hatch.build.targets.sdist]
 only-include = ["worldline", "examples", "tests", "docs/worldline", ".githooks", ".dockerignore", "AGENTS.md", "LICENSE", "README.md", "CONTRIBUTING.md"]

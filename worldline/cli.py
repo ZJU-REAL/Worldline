@@ -32,6 +32,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="worldline", description="Train, distill, and evaluate sandboxed agents")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
+    from worldline.evaluation_cli import add_commands
+
+    add_commands(commands)
 
     inspect_parser = commands.add_parser("inspect", help="Inspect a native or Harbor-compatible task")
     inspect_parser.add_argument("task_dir", type=Path)
@@ -226,6 +229,10 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if args.command in {"run", "harnesses", "suites"}:
+        from worldline.evaluation_cli import dispatch
+
+        return dispatch(args, parser)
     if args.command in {"export", "distill"}:
         from worldline.learning.quality import QualityPolicy
 

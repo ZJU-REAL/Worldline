@@ -1,0 +1,13 @@
+# Install vLLM in a GPU serving environment, then:
+# worldline run --model-config examples/models/open-model.toml
+[model]
+schema_version = "worldline.model/0.1"
+reference = "Qwen/Qwen2.5-7B-Instruct"
+backend = "vllm"
+protocol = "chat"
+vision = false
+api_key_env = "WORLDLINE_API_KEY"
+startup_timeout_sec = 600
+# Set revision to an immutable Hugging Face commit before a reproducible run.
+# revision = "<model-commit>"
+server_args = ["--max-model-len", "16384"]

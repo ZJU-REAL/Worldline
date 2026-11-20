@@ -19,7 +19,7 @@ from worldline.tasks import load_native_task
 from worldline.trace import TraceEvent, TraceWriter
 from worldline.media import MediaStore, MessageHistory
 from worldline.runtime.verdict import checked_verdict
-from worldline.agents.config import runtime_configuration, comparison_configuration
+from worldline.agents.config import runtime_configuration, comparison_configuration, comparison_settings
 from worldline.runtime.tools import public_spec
 
 
@@ -212,7 +212,7 @@ def evaluate_native(
         "budgets": record.metadata["evaluation"],
         "harness": harness_version,
         "worldline_version": __version__,
-        "agent_config": agent_config or {},
+        "agent_config": comparison_settings(agent_config or {}),
         "agent_runtime_config": comparison_configuration(runtime_config) if runtime_config else {},
         "environment_spec_hash": environment_spec_hash,
     }

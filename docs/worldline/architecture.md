@@ -24,6 +24,9 @@ flowchart LR
 | `worldline/contracts.py`、`tasks.py`、`plugins.py`、`errors.py` | 跨领域契约、原生任务、插件发现和错误分类 | 平台契约与兼容性维护 |
 | `worldline/runtime/` | 环境进程、预算、session、持久化队列/恢复、资源 admission | 环境基础设施与调度 |
 | `worldline/agents/` | 模型 API、工具决策、对话记录 | Harness、规划、记忆和 Agent 方法 |
+| `worldline/models/` | 模型引用/版本、owned inference 服务生命周期和协议预检 | Serving 后端维护 |
+| `worldline/harnesses/` | 独立 Harness 注册、JSON/tool loops、Harbor agent 选择 | Harness/Agent 方法小组 |
+| `worldline/suites/`、`evaluation.py` | 打包 smoke、模型/任务兼容性与统一评测编排 | 用户入口和集成测试 |
 | `worldline/domains/rua/` | RUA 环境实现、动作语义和开发参考策略 | 机器人环境与验证器 |
 | `worldline/domains/cua/`、`worldline/adapters/browsergym.py` | CUA 插件与 BrowserGym 协议/任务适配 | 浏览器环境与验证器 |
 | `worldline/adapters/` | Harbor/EFE、RUA 任务目录与既有协议转换 | 外部系统接入 |
@@ -77,7 +80,22 @@ Python 接口 `evaluate_native(..., agent_factory=...)` 接受任意满足 `Agen
 
 `split_group` 将演示改写、场景变体和恢复分支绑定；显式 train/validation/test 划分优先于哈希划分，冲突直接失败。未声明 split 的历史轨迹默认排除；显式审核开关记录在 manifest。训练入口拒绝 held-out/validation 记录进入 train，并校验跨文件 task/group 重叠。
 
-训练配置、输入哈希、计数、有效命令和退出状态写入训练 manifest。模型训练完成后通过模型服务重新接入 `rollout --agent openai-compatible`，在显式 test 任务上复评；部署模型服务由训练/服务后端承担。
+训练配置、输入哈希、计数、有效命令和退出状态写入训练 manifest。模型训练完成后通过 `worldline run --model /path/to/checkpoint --tasks ...` 或已有 endpoint 在显式 test 任务上复评；训练器保持独立，模型服务由独立 serving 层运行。
+
+## 0.6 模型与 Harness
+
+`models.ModelConfig` 声明来源、served name、协议、视觉能力和 serving 后端；`ResolvedModel`
+只提供推理地址和来源元数据。`harnesses.HarnessPlugin` 声明 native/Harbor 路由及模型协议，
+native 工厂收到公开 runtime 参数。`evaluation.run_evaluation` 组合三者，复用现有持久化
+批次运行器，不包含领域动作或训练算法。模型/环境进程分别持有生命周期，环境不启动模型。
+
+owned serving 使用 `runtime/command_guard.py` 管理整个进程组。一个服务供批次全部 worker
+使用；凭据不进入 argv、plan 或 trace。模型来源记录在实际 run 内，比较键排除模型名称、
+来源和 revision，保留 Harness/环境/预算配置。恢复签名继续包含完整模型配置，避免替换模型
+后复用已完成结果。已完成恢复校验 artifact/report hashes，无需重新启动服务。
+
+Codex 通过 Harbor 自有 agent 执行，与原生仅公开工具的 JSON/tools Harness 分开路由。
+正式 EFE 任务保持在外部 checkout 和上游隔离协议内。详见 [模型评测](model-evaluation.md)。
 
 ## 0.3 存储与上游边界
 

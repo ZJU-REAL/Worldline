@@ -67,7 +67,7 @@ def prepare_messages(messages: list, task: Task, spec: dict, observation: Any) -
             "content": (
                 "Operate the environment using its public tools. Check feedback before claiming completion. "
                 "A tool returning normally does not imply the task succeeded. Environment specification: "
-                + json.dumps(spec, ensure_ascii=False)
+                + json.dumps({key: value for key, value in spec.items() if key != "tools"}, ensure_ascii=False)
             ),
         },
         {"role": "user", "content": task.instruction},
@@ -172,6 +172,9 @@ class OpenAICompatibleAgent:
             "request_timeout_sec": self.request_timeout_sec,
         }
 
+    def _tool_request(self) -> dict:
+        return {"tools": tools_for(self.spec), "tool_choice": "auto"}
+
     def _completion(self) -> dict:
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
@@ -189,14 +192,14 @@ class OpenAICompatibleAgent:
         removed = len(self.messages) - len(context)
         if removed:
             self.emit("model.context_trimmed", {"removed_messages": removed, "max_bytes": self.max_context_bytes})
-        self.emit("model.request_context", {"model": self.model, "messages": context, "tools": tools_for(self.spec)})
+        tool_request = self._tool_request()
+        self.emit("model.request_context", {"model": self.model, "messages": context, **tool_request})
         if isinstance(self.messages, MessageHistory):
             context = hydrate_media(context, self.messages.media.root)
         body = {
             "model": self.model,
             "messages": context,
-            "tools": tools_for(self.spec),
-            "tool_choice": "auto",
+            **tool_request,
             "stream": False,
             "max_tokens": min(self.max_output_tokens, self.max_total_tokens - int(used))
             if self.max_total_tokens
